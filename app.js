@@ -87,6 +87,17 @@ const app = {
       // Setup login profiles grid
       this.renderLoginProfiles();
 
+      // Setup Supabase Realtime Changes Subscription
+      if (window.supabaseInstance) {
+        window.supabaseInstance
+          .channel('schema-db-changes')
+          .on('postgres_changes', { event: '*', schema: 'public' }, () => {
+            console.log('Realtime DB change detected. Refreshing...');
+            this.refreshData().then(() => this.updateView());
+          })
+          .subscribe();
+      }
+
       // GPS simulation
       this.fetchGpsLocation();
 
@@ -113,68 +124,9 @@ const app = {
 
   async syncWithServer() {
     try {
-      // 1. Fetch central server state
-      const res = await fetch('/api/data');
-      if (!res.ok) throw new Error('Server returned error status');
-      const serverData = await res.json();
-
-      // 2. Fetch local IndexedDB state
-      const localStaff = await window.TrailCashDB.getStaff();
-      const localTx = await window.TrailCashDB.getCashTransactions();
-      const localExp = await window.TrailCashDB.getExpenses();
-      const localIncoming = await window.TrailCashDB.getIncomingMoney();
-
-      // 3. Merging lists uniquely by ID
-      const mergeLists = (serverList, localList) => {
-        const map = new Map();
-        (serverList || []).forEach(item => map.set(item.id, item));
-        (localList || []).forEach(item => {
-          // Keep newest or locally updated record
-          map.set(item.id, { ...map.get(item.id), ...item });
-        });
-        return Array.from(map.values());
-      };
-
-      const mergedStaff = mergeLists(serverData.staff, localStaff);
-      const mergedTx = mergeLists(serverData.transactions, localTx);
-      const mergedExp = mergeLists(serverData.expenses, localExp);
-      const mergedIncoming = mergeLists(serverData.incoming_money, localIncoming);
-
-      // Ensure Rishabh exists
-      if (!mergedStaff.find(s => s.name === 'Rishabh')) {
-        mergedStaff.unshift({ id: 'staff-rishabh', name: 'Rishabh', pin: '1111', role: 'Owner', status: 'Active' });
-      }
-
-      // Detect if new pending approvals are downloaded (only if owner is Rishabh)
-      if (this.currentUser === 'Rishabh') {
-        const serverPendings = (serverData.incoming_money || []).filter(i => i.status === 'Pending Approval');
-        const knownPendings = (this.data.incoming_money || []).filter(i => i.status === 'Pending Approval');
-        // Notify if there is any pending record that was not in our current memory
-        serverPendings.forEach(sp => {
-          if (!knownPendings.find(kp => kp.id === sp.id)) {
-            this.showToast(`${sp.createdBy} recorded ₹${sp.amount.toLocaleString('en-IN')} as Incoming Money from ${sp.receivedFrom} via ${sp.paymentMethod}.`, 'warning');
-          }
-        });
-      }
-
-      // 4. Post back the merged records
-      const postRes = await fetch('/api/data', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          staff: mergedStaff,
-          transactions: mergedTx,
-          expenses: mergedExp,
-          incoming_money: mergedIncoming
-        })
-      });
-
-      if (!postRes.ok) throw new Error('Failed to post merged data to server');
-
-      // 5. Update local database tables
-      await window.TrailCashDB.overwriteAllLocalData(mergedStaff, mergedTx, mergedExp, mergedIncoming);
-
-      this.isOnline = true;
+      await window.TrailCashDB.syncOfflineQueue();
+      await this.refreshData();
+      this.isOnline = navigator.onLine;
       this.syncNetworkUI();
     } catch (err) {
       console.warn('Central sync failed. Operating in local offline mode:', err);
@@ -373,13 +325,41 @@ const app = {
     this.renderLoginProfiles();
   },
 
-  pressPinKey(key) {
+  async pressPinKey(key) {
     if (this.enteredPin.length >= 4) return;
     this.enteredPin += key;
     this.updatePinDots();
 
     if (this.enteredPin.length === 4) {
-      if (this.enteredPin === this.loginSelectedUser.pin) {
+      let loginSuccess = false;
+      const email = `${this.loginSelectedUser.name.toLowerCase()}@saroutdoors.com`;
+      const password = `saroutdoors-pin${this.enteredPin}`;
+
+      if (navigator.onLine && window.supabaseInstance) {
+        try {
+          const { data, error } = await window.supabaseInstance.auth.signInWithPassword({
+            email,
+            password
+          });
+          if (!error && data?.user) {
+            loginSuccess = true;
+          } else {
+            console.warn('Supabase Auth login failed, testing cached credentials...', error);
+          }
+        } catch (err) {
+          console.warn('Supabase authentication server unreachable:', err);
+        }
+      }
+
+      // Fallback: If offline or Supabase sign-in failed, check local pin value
+      if (!loginSuccess) {
+        if (this.enteredPin === this.loginSelectedUser.pin) {
+          loginSuccess = true;
+          console.log('User authenticated offline successfully.');
+        }
+      }
+
+      if (loginSuccess) {
         this.currentUser = this.loginSelectedUser.name;
         document.getElementById('loginOverlay').classList.remove('active');
         this.showToast(`Logged in: ${this.currentUser}`, 'success');
@@ -426,6 +406,9 @@ const app = {
   },
 
   logoutUser() {
+    if (navigator.onLine && window.supabaseInstance) {
+      window.supabaseInstance.auth.signOut().catch(err => console.error('SignOut error:', err));
+    }
     this.currentUser = null;
     document.getElementById('loginOverlay').classList.add('active');
     this.cancelPinEntry();
@@ -544,11 +527,10 @@ const app = {
       expenseCount 
     };
   },
-
   /* ==================== FEATURE 3: DATE-WISE DASHBOARD ==================== */
   renderDatewiseDashboard() {
-    // Render approvals panel
     this.renderOwnerApprovals();
+    this.renderOwnerActivityFeed();
 
     const container = document.getElementById('dateCardsContainer');
     container.innerHTML = '';
@@ -636,6 +618,77 @@ const app = {
     document.getElementById('companyTotalIssued').textContent = `₹${issued.toLocaleString('en-IN')}`;
     document.getElementById('companyTotalSpent').textContent = `₹${spent.toLocaleString('en-IN')}`;
     document.getElementById('companyTotalBalance').textContent = `₹${balance.toLocaleString('en-IN')}`;
+  },
+
+  renderOwnerActivityFeed() {
+    const feedContainer = document.getElementById('ownerActivityFeedContainer');
+    if (!feedContainer) return;
+    feedContainer.innerHTML = '';
+
+    const feedEvents = [];
+
+    // 1. Owner cash issues
+    this.data.transactions.forEach(t => {
+      feedEvents.push({
+        time: new Date(t.dateTime),
+        text: `Owner sent <strong>₹${t.amount.toLocaleString('en-IN')}</strong> to ${t.staffName} (${t.mode})`,
+        icon: '💵',
+        color: 'var(--accent-blue)'
+      });
+    });
+
+    // 2. Logged expenses (staff and company)
+    this.data.expenses.forEach(e => {
+      const verb = e.receiptPhoto ? 'uploaded' : 'added';
+      const noun = e.receiptPhoto ? 'bill' : 'expense';
+      const staffLabel = e.isOwnerExpense ? 'Owner (Company)' : e.staffName;
+      feedEvents.push({
+        time: new Date(e.dateTime),
+        text: `${staffLabel} ${verb} <strong>${e.category}</strong> ${noun} <strong>₹${e.amount.toLocaleString('en-IN')}</strong>`,
+        icon: e.receiptPhoto ? '📄' : '💸',
+        color: 'var(--warning)'
+      });
+    });
+
+    // 3. Incoming money records
+    (this.data.incoming_money || []).forEach(i => {
+      const statusLabel = i.status === 'Approved' ? 'Approved' : (i.status === 'Pending Approval' ? 'Pending' : 'Rejected');
+      const statusColor = i.status === 'Approved' ? 'var(--primary)' : (i.status === 'Pending Approval' ? 'var(--warning)' : 'var(--danger)');
+      feedEvents.push({
+        time: new Date(i.dateTime),
+        text: `${i.createdBy} recorded Incoming <strong>₹${i.amount.toLocaleString('en-IN')}</strong> from ${i.receivedFrom} <span style="color: ${statusColor}; font-weight: bold;">(${statusLabel})</span>`,
+        icon: '📥',
+        color: 'var(--primary)'
+      });
+    });
+
+    // Sort newest first
+    feedEvents.sort((a, b) => b.time - a.time);
+
+    // Slice to top 20 events
+    const topEvents = feedEvents.slice(0, 20);
+
+    if (topEvents.length === 0) {
+      feedContainer.innerHTML = `<div style="text-align: center; color: var(--text-muted); font-style: italic; padding: 12px; font-size: 0.7rem;">No recent activities.</div>`;
+      return;
+    }
+
+    topEvents.forEach(ev => {
+      const item = document.createElement('div');
+      item.style.cssText = 'background: rgba(255,255,255,0.01); border: 1px solid var(--panel-border); border-radius: 8px; padding: 6px 10px; display: flex; align-items: center; gap: 8px; line-height: 1.3; margin-bottom: 4px;';
+      
+      const dateStr = ev.time.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' });
+      const timeStr = ev.time.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true });
+
+      item.innerHTML = `
+        <span style="font-size: 1rem; flex-shrink: 0;">${ev.icon}</span>
+        <div style="flex: 1;">
+          <span style="color: var(--text-muted); font-size: 0.6rem; display: block; font-weight: 500;">${dateStr}, ${timeStr}</span>
+          <span style="color: var(--text-primary); font-size: 0.72rem; line-height: 1.25; display: block;">${ev.text}</span>
+        </div>
+      `;
+      feedContainer.appendChild(item);
+    });
   },
 
   renderOwnerApprovals() {

@@ -23,6 +23,15 @@ else:
     except Exception as e:
         print(f"Migration error: {e}")
 
+def load_dotenv():
+    if os.path.exists('.env'):
+        with open('.env', 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith('#') and '=' in line:
+                    key, val = line.split('=', 1)
+                    os.environ[key.strip()] = val.strip().strip('"').strip("'")
+
 class SyncHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
     def end_headers(self):
         # Enable CORS headers for cross-origin testing
@@ -37,7 +46,17 @@ class SyncHTTPRequestHandler(http.server.SimpleHTTPRequestHandler):
 
     def do_GET(self):
         parsed_url = urllib.parse.urlparse(self.path)
-        if parsed_url.path == '/api/data':
+        if parsed_url.path == '/api/config':
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            load_dotenv()
+            config = {
+                "supabaseUrl": os.environ.get("SUPABASE_URL", ""),
+                "supabaseAnonKey": os.environ.get("SUPABASE_ANON_KEY", "")
+            }
+            self.wfile.write(json.dumps(config).encode('utf-8'))
+        elif parsed_url.path == '/api/data':
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
