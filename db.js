@@ -69,7 +69,7 @@ async function uploadBase64ToStorage(base64Data, filename) {
     const blob = new Blob([uInt8Array], { type: contentType });
 
     const { data, error } = await supabase.storage
-      .from('trailcash-proofs')
+      .from('expense-bills')
       .upload(filename, blob, {
         cacheControl: '3600',
         upsert: true
@@ -81,7 +81,7 @@ async function uploadBase64ToStorage(base64Data, filename) {
     }
 
     const { data: publicUrlData } = supabase.storage
-      .from('trailcash-proofs')
+      .from('expense-bills')
       .getPublicUrl(filename);
 
     return publicUrlData.publicUrl;
