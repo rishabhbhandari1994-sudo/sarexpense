@@ -103,6 +103,19 @@
           </div>
         </div>
 
+        <!-- OWNER APPROVALS SECTION -->
+        <div id="ownerApprovalsCard" class="card glow-warning" style="display: none; border-color: var(--warning); background: rgba(245,158,11,0.03); margin-bottom: 14px;">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+            <strong style="color: var(--warning); font-size: 0.85rem; display: flex; align-items: center; gap: 6px;">
+              🔔 Pending Incoming Money Approvals
+            </strong>
+            <span id="ownerApprovalsBadge" class="badge" style="background: var(--warning); color: #000; font-weight: bold; font-size: 0.65rem; padding: 2px 6px; border-radius: 8px;">0</span>
+          </div>
+          <div id="ownerApprovalsContainer" style="display: flex; flex-direction: column; gap: 10px;">
+            <!-- Populated dynamically with pending approvals -->
+          </div>
+        </div>
+
         <!-- Section Title with Give Cash Action -->
         <div class="section-title">
           <span>Date-wise Activity</span>
@@ -149,6 +162,19 @@
 
       <!-- SCREEN: OWNER REPORTS & COMPANY EXPENSES -->
       <div id="ownerReportsTab" class="tab-content" style="display: none;">
+        <!-- Reports Filter -->
+        <div class="card" style="margin-bottom: 12px; padding: 10px; border-color: rgba(59, 130, 246, 0.2);">
+          <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
+            <label class="form-label" style="margin-bottom: 0; font-size: 0.75rem; white-space: nowrap;">Filter Transaction Type:</label>
+            <select class="form-input" id="reportTypeFilter" onchange="app.renderReports()" style="font-size: 0.75rem; padding: 6px; margin-bottom: 0; max-width: 180px;">
+              <option value="All">All Transactions</option>
+              <option value="Sent">Money Sent by Owner</option>
+              <option value="Incoming">Incoming Money (Approved)</option>
+              <option value="Expenses">Expenses (Staff + Office)</option>
+            </select>
+          </div>
+        </div>
+
         <!-- Reports Summary Stats Card -->
         <div class="stats-grid">
           <div class="stat-box">
@@ -267,6 +293,16 @@
               <div class="stat-label" data-i18n="remainingBalance">Remaining Balance</div>
               <div class="stat-value primary" id="staffRemainingVal">₹0</div>
             </div>
+          </div>
+
+          <!-- Staff Action Buttons -->
+          <div style="display: flex; gap: 8px; margin-top: 12px;">
+            <button class="btn" style="flex: 1; font-size: 0.8rem; padding: 10px; display: flex; align-items: center; justify-content: center; gap: 6px; background: var(--accent-purple); color: #fff;" onclick="app.openAddExpenseModal()">
+              💸 Log Field Expense
+            </button>
+            <button class="btn" style="flex: 1; font-size: 0.8rem; padding: 10px; display: flex; align-items: center; justify-content: center; gap: 6px; background: var(--primary); color: #fff;" onclick="app.openAddIncomingMoneyModal()">
+              ➕ Add Incoming Money
+            </button>
           </div>
 
           <!-- Unsynced Warning Banner -->
@@ -438,6 +474,94 @@
       </div>
     </div>
 
+    <!-- MODAL: ADD INCOMING MONEY -->
+    <div class="modal-overlay" id="addIncomingMoneyModal">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h2 class="modal-title">➕ Add Incoming Money</h2>
+          <button class="modal-close" onclick="app.closeModal('addIncomingMoneyModal')">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        </div>
+        <form id="addIncomingMoneyForm" onsubmit="app.saveIncomingMoney(event)">
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label">Date</label>
+              <input type="date" class="form-input" id="incomingDateInput" required>
+            </div>
+            <div class="form-group">
+              <label class="form-label">Time</label>
+              <input type="time" class="form-input" id="incomingTimeInput" required>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">Amount (₹)</label>
+            <input type="number" step="any" min="0.01" class="form-input" id="incomingAmountInput" placeholder="Enter amount" required>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">Received From</label>
+            <select class="form-input" id="incomingReceivedFromSelect" onchange="app.handleIncomingReceivedFromChange()" required>
+              <option value="Customer">Customer</option>
+              <option value="Owner">Owner</option>
+              <option value="Vendor">Vendor</option>
+              <option value="Guide">Guide</option>
+              <option value="Hotel">Hotel</option>
+              <option value="Driver">Driver</option>
+              <option value="Porter">Porter</option>
+              <option value="Mule Owner">Mule Owner</option>
+              <option value="Refund">Refund</option>
+              <option value="Other">Other (Specify)</option>
+            </select>
+          </div>
+
+          <div class="form-group" id="incomingOtherGroup" style="display: none;">
+            <label class="form-label">Specify "Received From"</label>
+            <input type="text" class="form-input" id="incomingOtherInput" placeholder="e.g. Agency Name">
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">Name of Person / Company</label>
+            <input type="text" class="form-input" id="incomingNameInput" placeholder="e.g. John Doe / Himalayan Lodge" required>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">Payment Method</label>
+            <select class="form-input" id="incomingPaymentSelect" required>
+              <option value="Cash">Cash</option>
+              <option value="UPI">UPI</option>
+              <option value="Bank">Bank</option>
+            </select>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">Remarks (Optional)</label>
+            <input type="text" class="form-input" id="incomingRemarksInput" placeholder="e.g. Return of advance or trek fee">
+          </div>
+
+          <!-- Proof Upload (Optional) -->
+          <div class="form-group">
+            <label class="form-label">Upload Payment Proof (Optional)</label>
+            <div class="upload-placeholder" onclick="app.triggerIncomingProofUpload()">
+              <svg id="incomingUploadIcon" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+              <span id="incomingUploadText">Upload Payment Proof / Screenshot</span>
+              <img id="incomingUploadPreview" class="upload-preview-img" style="display: none;" src="" alt="Proof Preview">
+              <input type="file" id="incomingProofFileInput" style="display: none;" accept="image/*" onchange="app.handleIncomingProofSelect(event)">
+            </div>
+            <div style="display: flex; gap: 8px; margin-top: 4px;">
+              <button type="button" class="btn btn-secondary" style="padding: 6px 12px; font-size: 0.75rem; flex: 1;" onclick="app.simulateIncomingProofCapture()">Simulate Camera Screenshot</button>
+              <button type="button" class="btn btn-secondary" style="padding: 6px 12px; font-size: 0.75rem; flex: 1; border-color: var(--danger); color: var(--danger);" onclick="app.clearIncomingProof()">Clear Proof</button>
+            </div>
+          </div>
+
+          <div style="margin-top: 16px;">
+            <button type="submit" class="btn" style="width: 100%;">Save Incoming Money</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
     <!-- MODAL: ISSUE CASH (SEND MONEY) -->
     <div class="modal-overlay" id="issueCashModal">
       <div class="modal-content">
@@ -574,10 +698,11 @@
         </div>
 
         <!-- Ledger View Section Toggle Chips -->
-        <div style="display: flex; gap: 6px; margin-top: 8px;">
+        <div style="display: flex; gap: 4px; margin-top: 8px; flex-wrap: wrap;">
           <button class="role-chip active" id="profileTabPassbookBtn" onclick="app.switchProfileModalTab('passbook')">Ledger Passbook</button>
-          <button class="role-chip" id="profileTabReceivedBtn" onclick="app.switchProfileModalTab('received')">Money History</button>
-          <button class="role-chip" id="profileTabExpensesBtn" onclick="app.switchProfileModalTab('expenses')">Expense History</button>
+          <button class="role-chip" id="profileTabReceivedBtn" onclick="app.switchProfileModalTab('received')">Money Sent by Owner</button>
+          <button class="role-chip" id="profileTabIncomingBtn" onclick="app.switchProfileModalTab('incoming')">Incoming Money</button>
+          <button class="role-chip" id="profileTabExpensesBtn" onclick="app.switchProfileModalTab('expenses')">Expenses</button>
         </div>
 
         <div style="display: flex; gap: 8px; margin-top: 4px;">

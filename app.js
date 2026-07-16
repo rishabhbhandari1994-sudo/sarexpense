@@ -53,13 +53,15 @@ const app = {
   data: {
     staff: [],
     transactions: [], // Advances issued to staff
-    expenses: [] // Staff expenses + Owner company expenses
+    expenses: [], // Staff expenses + Owner company expenses
+    incoming_money: [] // Staff recorded incoming money
   },
 
   // Temp form fields
   selectedCategory: '',
   tempReceiptData: null,
   tempGpsCoords: null,
+  tempIncomingProofData: null, // Temp holder for incoming money proof
 
   // Login variables
   loginSelectedUser: null,
@@ -77,6 +79,9 @@ const app = {
     try {
       // Connect to IndexedDB wrapper (TrailCashDB)
       await window.TrailCashDB.initAndSeed();
+      
+      // First sync attempt
+      await this.syncWithServer();
       await this.refreshData();
 
       // Setup login profiles grid
@@ -84,6 +89,13 @@ const app = {
 
       // GPS simulation
       this.fetchGpsLocation();
+
+      // Setup background periodic synchronization every 10 seconds
+      setInterval(async () => {
+        await this.syncWithServer();
+        await this.refreshData();
+        this.updateView();
+      }, 10000);
 
       // Listen to online status
       this.isOnline = navigator.onLine;
@@ -99,10 +111,83 @@ const app = {
     }
   },
 
+  async syncWithServer() {
+    try {
+      // 1. Fetch central server state
+      const res = await fetch('/api/data');
+      if (!res.ok) throw new Error('Server returned error status');
+      const serverData = await res.json();
+
+      // 2. Fetch local IndexedDB state
+      const localStaff = await window.TrailCashDB.getStaff();
+      const localTx = await window.TrailCashDB.getCashTransactions();
+      const localExp = await window.TrailCashDB.getExpenses();
+      const localIncoming = await window.TrailCashDB.getIncomingMoney();
+
+      // 3. Merging lists uniquely by ID
+      const mergeLists = (serverList, localList) => {
+        const map = new Map();
+        (serverList || []).forEach(item => map.set(item.id, item));
+        (localList || []).forEach(item => {
+          // Keep newest or locally updated record
+          map.set(item.id, { ...map.get(item.id), ...item });
+        });
+        return Array.from(map.values());
+      };
+
+      const mergedStaff = mergeLists(serverData.staff, localStaff);
+      const mergedTx = mergeLists(serverData.transactions, localTx);
+      const mergedExp = mergeLists(serverData.expenses, localExp);
+      const mergedIncoming = mergeLists(serverData.incoming_money, localIncoming);
+
+      // Ensure Rishabh exists
+      if (!mergedStaff.find(s => s.name === 'Rishabh')) {
+        mergedStaff.unshift({ id: 'staff-rishabh', name: 'Rishabh', pin: '1111', role: 'Owner', status: 'Active' });
+      }
+
+      // Detect if new pending approvals are downloaded (only if owner is Rishabh)
+      if (this.currentUser === 'Rishabh') {
+        const serverPendings = (serverData.incoming_money || []).filter(i => i.status === 'Pending Approval');
+        const knownPendings = (this.data.incoming_money || []).filter(i => i.status === 'Pending Approval');
+        // Notify if there is any pending record that was not in our current memory
+        serverPendings.forEach(sp => {
+          if (!knownPendings.find(kp => kp.id === sp.id)) {
+            this.showToast(`${sp.createdBy} recorded ₹${sp.amount.toLocaleString('en-IN')} as Incoming Money from ${sp.receivedFrom} via ${sp.paymentMethod}.`, 'warning');
+          }
+        });
+      }
+
+      // 4. Post back the merged records
+      const postRes = await fetch('/api/data', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          staff: mergedStaff,
+          transactions: mergedTx,
+          expenses: mergedExp,
+          incoming_money: mergedIncoming
+        })
+      });
+
+      if (!postRes.ok) throw new Error('Failed to post merged data to server');
+
+      // 5. Update local database tables
+      await window.TrailCashDB.overwriteAllLocalData(mergedStaff, mergedTx, mergedExp, mergedIncoming);
+
+      this.isOnline = true;
+      this.syncNetworkUI();
+    } catch (err) {
+      console.warn('Central sync failed. Operating in local offline mode:', err);
+      this.isOnline = false;
+      this.syncNetworkUI();
+    }
+  },
+
   async refreshData() {
     this.data.staff = await window.TrailCashDB.getStaff();
     this.data.transactions = await window.TrailCashDB.getCashTransactions();
     this.data.expenses = await window.TrailCashDB.getExpenses();
+    this.data.incoming_money = await window.TrailCashDB.getIncomingMoney();
   },
 
   // Active staff helper
@@ -422,11 +507,24 @@ const app = {
   },
 
   /* ==================== BALANCES & STATS COMPUTATION ==================== */
-  getStaffBalances(staffName) {
-    // Money sent to this staff member
-    const received = this.data.transactions
+  getStaffBalances(staffName, isOwnerView = false) {
+    // Money sent to this staff member by Owner
+    const receivedFromOwner = this.data.transactions
       .filter(t => t.staffName === staffName)
       .reduce((sum, t) => sum + t.amount, 0);
+
+    // Incoming money recorded by this staff member (Approved)
+    const approvedIncoming = (this.data.incoming_money || [])
+      .filter(i => i.createdBy === staffName && i.status === 'Approved')
+      .reduce((sum, i) => sum + i.amount, 0);
+
+    // Incoming money recorded by this staff member (Pending)
+    const pendingIncoming = (this.data.incoming_money || [])
+      .filter(i => i.createdBy === staffName && i.status === 'Pending Approval')
+      .reduce((sum, i) => sum + i.amount, 0);
+
+    // If Owner is viewing, count only Approved. If Staff is viewing, count Approved + Pending Approval.
+    const received = receivedFromOwner + approvedIncoming + (isOwnerView ? 0 : pendingIncoming);
 
     // Money spent by this staff member
     const spent = this.data.expenses
@@ -436,24 +534,42 @@ const app = {
     const balance = received - spent;
     const expenseCount = this.data.expenses.filter(e => e.staffName === staffName && !e.isOwnerExpense).length;
 
-    return { received, spent, balance, expenseCount };
+    return { 
+      received, 
+      receivedFromOwner,
+      approvedIncoming,
+      pendingIncoming,
+      spent, 
+      balance, 
+      expenseCount 
+    };
   },
 
   /* ==================== FEATURE 3: DATE-WISE DASHBOARD ==================== */
   renderDatewiseDashboard() {
+    // Render approvals panel
+    this.renderOwnerApprovals();
+
     const container = document.getElementById('dateCardsContainer');
     container.innerHTML = '';
 
     // Populate filter selectors if empty
     this.populateFilterDropdowns();
 
-    // Gather unique dates from matching transactions and expenses
+    // Gather unique dates from matching transactions, expenses, and incoming money
     const filteredTx = this.getFilteredTransactions();
     const filteredExp = this.getFilteredExpenses();
+    const filteredInc = (this.data.incoming_money || []).filter(i => {
+      if (this.filters.staff && i.createdBy !== this.filters.staff) return false;
+      if (this.filters.startDate && i.dateTime.split('T')[0] < this.filters.startDate) return false;
+      if (this.filters.endDate && i.dateTime.split('T')[0] > this.filters.endDate) return false;
+      return true;
+    });
 
     const dateSet = new Set();
     filteredTx.forEach(t => dateSet.add(t.dateTime.split('T')[0]));
     filteredExp.forEach(e => dateSet.add(e.dateTime.split('T')[0]));
+    filteredInc.forEach(i => dateSet.add(i.dateTime.split('T')[0]));
 
     const uniqueDates = Array.from(dateSet).sort((a, b) => new Date(b) - new Date(a));
 
@@ -470,8 +586,9 @@ const app = {
     uniqueDates.forEach(dateStr => {
       const dateTx = filteredTx.filter(t => t.dateTime.split('T')[0] === dateStr);
       const dateExp = filteredExp.filter(e => e.dateTime.split('T')[0] === dateStr);
+      const dateInc = filteredInc.filter(i => i.dateTime.split('T')[0] === dateStr && i.status === 'Approved');
 
-      const moneySent = dateTx.reduce((sum, t) => sum + t.amount, 0);
+      const moneySent = dateTx.reduce((sum, t) => sum + t.amount, 0) + dateInc.reduce((sum, i) => sum + i.amount, 0);
       const moneySpent = dateExp.reduce((sum, e) => sum + e.amount, 0);
       const dailyBalance = moneySent - moneySpent;
 
@@ -521,6 +638,99 @@ const app = {
     document.getElementById('companyTotalBalance').textContent = `₹${balance.toLocaleString('en-IN')}`;
   },
 
+  renderOwnerApprovals() {
+    const card = document.getElementById('ownerApprovalsCard');
+    const container = document.getElementById('ownerApprovalsContainer');
+    const badge = document.getElementById('ownerApprovalsBadge');
+    if (!card || !container) return;
+
+    const pendings = (this.data.incoming_money || []).filter(i => i.status === 'Pending Approval');
+    
+    if (pendings.length === 0) {
+      card.style.display = 'none';
+      return;
+    }
+
+    card.style.display = 'block';
+    badge.textContent = pendings.length;
+    container.innerHTML = '';
+
+    pendings.forEach(p => {
+      const dt = new Date(p.dateTime);
+      const dateStr = dt.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' });
+      const timeStr = dt.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: false });
+      
+      const row = document.createElement('div');
+      row.style.cssText = 'background: rgba(255,255,255,0.02); border: 1px solid var(--panel-border); border-radius: 12px; padding: 10px; display: flex; flex-direction: column; gap: 8px; font-size: 0.75rem;';
+      
+      row.innerHTML = `
+        <div style="display: flex; justify-content: space-between; align-items: flex-start;">
+          <div>
+            <strong style="color: var(--warning); font-size: 0.8rem;">₹${p.amount.toLocaleString('en-IN')}</strong> from <strong>${p.receivedFrom}</strong>
+            <div style="font-size: 0.65rem; color: var(--text-muted); margin-top: 1px;">
+              Logged by: <strong>${p.createdBy}</strong> on ${dateStr} ${timeStr}
+            </div>
+            <div style="font-size: 0.65rem; color: var(--text-secondary); margin-top: 2px;">
+              Payee: "${p.name}" • Method: ${p.paymentMethod}
+              ${p.remarks ? ` • Remarks: "${p.remarks}"` : ''}
+            </div>
+          </div>
+          ${p.proofPhoto ? `
+            <span style="color: var(--primary); cursor: pointer; text-decoration: underline; font-size: 0.65rem; font-weight: bold;" onclick="app.viewIncomingProof('${p.id}')">
+              View Proof 📄
+            </span>
+          ` : '<span style="color: var(--text-muted); font-size: 0.65rem;">No Proof</span>'}
+        </div>
+        
+        <div style="display: flex; gap: 6px; align-items: center; margin-top: 4px;">
+          <input type="text" id="comment-${p.id}" class="form-input" placeholder="Add optional comment..." style="font-size: 0.7rem; padding: 6px 8px; margin-bottom: 0; flex: 1;">
+          <button class="btn btn-secondary" onclick="app.handleRejectIncomingAction('${p.id}')" style="padding: 6px 10px; font-size: 0.7rem; color: var(--danger); border-color: rgba(239, 68, 68, 0.2); background: transparent;">Reject</button>
+          <button class="btn" onclick="app.handleApproveIncomingAction('${p.id}')" style="padding: 6px 10px; font-size: 0.7rem; background: var(--primary); color: #000; font-weight: bold;">Approve</button>
+        </div>
+      `;
+      container.appendChild(row);
+    });
+  },
+
+  handleApproveIncomingAction(id) {
+    const comment = document.getElementById(`comment-${id}`).value.trim();
+    this.approveIncomingMoney(id, comment);
+  },
+
+  handleRejectIncomingAction(id) {
+    const comment = document.getElementById(`comment-${id}`).value.trim();
+    if (!comment) {
+      if (!confirm('Warning: Rejecting without a comment. Click OK to proceed, or Cancel to add a comment.')) {
+        return;
+      }
+    }
+    this.rejectIncomingMoney(id, comment);
+  },
+
+  viewIncomingProof(id) {
+    const record = this.data.incoming_money.find(i => i.id === id);
+    if (!record || !record.proofPhoto) return;
+
+    // Reuse existing viewer overlay by creating a temp mockup overlay
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay active';
+    overlay.style.zIndex = '2000';
+    overlay.innerHTML = `
+      <div class="modal-content" style="max-height: 85%;">
+        <div class="modal-header">
+          <h2 class="modal-title">Payment Proof Preview</h2>
+          <button class="modal-close" onclick="this.closest('.modal-overlay').remove()">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        </div>
+        <div style="text-align: center; overflow: auto; padding: 10px;">
+          <img src="${record.proofPhoto}" style="max-width: 100%; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.5);">
+        </div>
+      </div>
+    `;
+    document.body.appendChild(overlay);
+  },
+
   /* ==================== FEATURE 4: OWNER DASHBOARD (STAFF CARDS) ==================== */
   renderOwnerStaffDashboard() {
     const container = document.getElementById('ownerStaffCardsContainer');
@@ -534,7 +744,7 @@ const app = {
     }
 
     staffMembers.forEach(s => {
-      const stats = this.getStaffBalances(s.name);
+      const stats = this.getStaffBalances(s.name, true);
       const initials = s.name.substring(0, 2).toUpperCase();
 
       const card = document.createElement('div');
@@ -572,6 +782,7 @@ const app = {
     // Set active style for tabs
     document.getElementById('profileTabPassbookBtn').className = 'role-chip active';
     document.getElementById('profileTabReceivedBtn').className = 'role-chip';
+    document.getElementById('profileTabIncomingBtn').className = 'role-chip';
     document.getElementById('profileTabExpensesBtn').className = 'role-chip';
 
     document.getElementById('indivStaffTitleName').textContent = staffName;
@@ -584,6 +795,7 @@ const app = {
     
     document.getElementById('profileTabPassbookBtn').className = `role-chip ${tabName === 'passbook' ? 'active' : ''}`;
     document.getElementById('profileTabReceivedBtn').className = `role-chip ${tabName === 'received' ? 'active' : ''}`;
+    document.getElementById('profileTabIncomingBtn').className = `role-chip ${tabName === 'incoming' ? 'active' : ''}`;
     document.getElementById('profileTabExpensesBtn').className = `role-chip ${tabName === 'expenses' ? 'active' : ''}`;
 
     this.renderStaffProfileModalContent();
@@ -591,7 +803,8 @@ const app = {
 
   renderStaffProfileModalContent() {
     const staffName = this.activeStaffProfileName;
-    const stats = this.getStaffBalances(staffName);
+    const isOwner = (this.currentUser === 'Rishabh');
+    const stats = this.getStaffBalances(staffName, isOwner);
 
     // Set stats header
     document.getElementById('indivStaffIssued').textContent = `₹${stats.received.toLocaleString('en-IN')}`;
@@ -604,16 +817,21 @@ const app = {
 
     if (this.activeProfileModalTab === 'passbook') {
       // 1. Passbook Running Ledger
-      // Combine cash advances and staff expenses chronologically
+      // Combine cash advances, approved incoming, and staff expenses chronologically
       const advances = this.data.transactions
         .filter(t => t.staffName === staffName)
-        .map(t => ({ ...t, passType: 'credit' }));
+        .map(t => ({ ...t, passType: 'credit', docType: 'Owner Sent' }));
+
+      // Include Pending items too for the staff member themselves, but only Approved for the Owner
+      const incoming = (this.data.incoming_money || [])
+        .filter(i => i.createdBy === staffName && (i.status === 'Approved' || (!isOwner && i.status === 'Pending Approval')))
+        .map(i => ({ ...i, passType: 'credit', docType: 'Incoming', isPending: i.status === 'Pending Approval' }));
 
       const spends = this.data.expenses
         .filter(e => e.staffName === staffName && !e.isOwnerExpense)
-        .map(e => ({ ...e, passType: 'debit' }));
+        .map(e => ({ ...e, passType: 'debit', docType: 'Expense' }));
 
-      const unified = [...advances, ...spends].sort((a, b) => new Date(a.dateTime) - new Date(b.dateTime));
+      const unified = [...advances, ...incoming, ...spends].sort((a, b) => new Date(a.dateTime) - new Date(b.dateTime));
 
       if (unified.length === 0) {
         container.innerHTML = `<div style="text-align: center; color: var(--text-muted); font-size: 0.75rem; padding: 12px;">Passbook is empty. No history.</div>`;
@@ -633,12 +851,24 @@ const app = {
 
         if (item.passType === 'credit') {
           runningBal += item.amount;
-          const remarks = item.refNumber ? `(${item.refNumber})` : '';
+          let label = 'Received Advance';
+          let badgeText = 'Credit';
+          let extra = '';
+          if (item.docType === 'Incoming') {
+            label = `Incoming: ${item.receivedFrom}`;
+            badgeText = item.isPending ? 'Pending' : 'Incoming';
+            if (item.isPending) {
+              extra = ` <span style="font-size:0.6rem; color:var(--warning); font-weight:bold;">(Pending)</span>`;
+            }
+          } else {
+            extra = item.refNumber ? `(${item.refNumber})` : '';
+          }
+
           row.innerHTML = `
             <div class="passbook-details">
               <span class="passbook-date">${dateStr} ${timeStr}</span>
-              <span class="passbook-desc">Received Advance ${remarks}</span>
-              <span class="passbook-type-badge passbook-type-in">Credit</span>
+              <span class="passbook-desc" style="color: var(--accent-blue); font-weight: 600;">${label} ${extra}</span>
+              <span class="passbook-type-badge" style="background: rgba(59, 130, 246, 0.1); color: var(--accent-blue); border-color: rgba(59, 130, 246, 0.2);">${badgeText}</span>
             </div>
             <div class="passbook-amounts">
               <span class="passbook-amount credit">+₹${item.amount.toLocaleString('en-IN')}</span>
@@ -651,7 +881,7 @@ const app = {
           row.innerHTML = `
             <div class="passbook-details">
               <span class="passbook-date">${dateStr} ${timeStr}</span>
-              <span class="passbook-desc">${label} - ${item.description}</span>
+              <span class="passbook-desc" style="color: var(--warning);">${label} - ${item.description}</span>
               <span class="passbook-type-badge passbook-type-out">Debit</span>
             </div>
             <div class="passbook-amounts">
@@ -680,19 +910,19 @@ const app = {
       container.appendChild(openRow);
 
     } else if (this.activeProfileModalTab === 'received') {
-      // 2. Money Received History
+      // 2. Money Received History (Sent by Owner)
       const advances = this.data.transactions
         .filter(t => t.staffName === staffName)
         .sort((a, b) => new Date(b.dateTime) - new Date(a.dateTime));
 
       if (advances.length === 0) {
-        container.innerHTML = `<div style="text-align: center; color: var(--text-muted); font-size: 0.75rem; padding: 12px;">No money received logs.</div>`;
+        container.innerHTML = `<div style="text-align: center; color: var(--text-muted); font-size: 0.75rem; padding: 12px;">No money sent logs.</div>`;
         return;
       }
 
       advances.forEach(tx => {
         const item = document.createElement('div');
-        item.style.cssText = 'background: rgba(255,255,255,0.02); border: 1px solid var(--panel-border); border-radius: 12px; padding: 10px; display: flex; justify-content: space-between; align-items: center;';
+        item.style.cssText = 'background: rgba(255,255,255,0.02); border: 1px solid var(--panel-border); border-radius: 12px; padding: 10px; display: flex; justify-content: space-between; align-items: center; border-left: 3px solid var(--accent-blue);';
         
         const dt = new Date(tx.dateTime);
         const dateStr = dt.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
@@ -706,13 +936,72 @@ const app = {
             </div>
             ${tx.refNumber ? `<div style="font-size: 0.7rem; color: var(--text-secondary); margin-top: 2px; font-style: italic;">"${tx.refNumber}"</div>` : ''}
           </div>
-          <strong style="font-size: 0.95rem; color: var(--primary);">₹${tx.amount.toLocaleString('en-IN')}</strong>
+          <strong style="font-size: 0.95rem; color: var(--accent-blue);">₹${tx.amount.toLocaleString('en-IN')}</strong>
+        `;
+        container.appendChild(item);
+      });
+
+    } else if (this.activeProfileModalTab === 'incoming') {
+      // 3. Incoming Money Tab
+      const incoming = (this.data.incoming_money || [])
+        .filter(i => i.createdBy === staffName)
+        .sort((a, b) => new Date(b.dateTime) - new Date(a.dateTime));
+
+      if (incoming.length === 0) {
+        container.innerHTML = `<div style="text-align: center; color: var(--text-muted); font-size: 0.75rem; padding: 12px;">No incoming money entries.</div>`;
+        return;
+      }
+
+      incoming.forEach(p => {
+        const dt = new Date(p.dateTime);
+        const dateStr = dt.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
+        const timeStr = dt.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: false });
+        
+        let statusBadge = '';
+        let badgeColor = 'var(--text-muted)';
+        if (p.status === 'Approved') {
+          statusBadge = '✅ Approved';
+          badgeColor = 'var(--primary)';
+        } else if (p.status === 'Pending Approval') {
+          statusBadge = '⏳ Pending';
+          badgeColor = 'var(--warning)';
+        } else {
+          statusBadge = '❌ Rejected';
+          badgeColor = 'var(--danger)';
+        }
+
+        const item = document.createElement('div');
+        item.style.cssText = `background: rgba(255,255,255,0.02); border: 1px solid var(--panel-border); border-radius: 12px; padding: 10px; display: flex; flex-direction: column; gap: 4px; border-left: 3px solid ${badgeColor};`;
+        
+        item.innerHTML = `
+          <div style="display: flex; justify-content: space-between; align-items: center;">
+            <strong style="font-size: 0.8rem; color: var(--text-primary);">📥 From: ${p.receivedFrom}</strong>
+            <strong style="font-size: 0.85rem; color: ${badgeColor}; font-weight: bold;">₹${p.amount.toLocaleString('en-IN')}</strong>
+          </div>
+          <div style="font-size: 0.65rem; color: var(--text-muted);">
+            ${dateStr} ${timeStr} • Method: ${p.paymentMethod} • Source: "${p.name}"
+            ${p.remarks ? `<span style="display: block; font-style: italic; color: var(--text-secondary); margin-top: 1px;">Remarks: "${p.remarks}"</span>` : ''}
+          </div>
+          <div style="font-size: 0.65rem; font-weight: bold; display: flex; justify-content: space-between; align-items: center; margin-top: 2px;">
+            <span style="color: ${badgeColor};">Status: ${statusBadge}</span>
+            ${p.proofPhoto ? `
+              <span style="color: var(--primary); cursor: pointer; text-decoration: underline;" onclick="app.viewIncomingProofFromLedger('${p.id}')">
+                View Proof 📄
+              </span>
+            ` : ''}
+          </div>
+          ${p.reviewedBy ? `
+            <div style="font-size: 0.65rem; color: var(--text-secondary); background: rgba(255,255,255,0.01); border-left: 2px solid ${badgeColor}; padding-left: 6px; margin-top: 4px; display: flex; flex-direction: column; gap: 1px;">
+              <span>Audited by: <strong>${p.reviewedBy}</strong> on ${new Date(p.reviewedAt).toLocaleDateString('en-IN')}</span>
+              ${p.comment ? `<span>Comment: "${p.comment}"</span>` : ''}
+            </div>
+          ` : ''}
         `;
         container.appendChild(item);
       });
 
     } else if (this.activeProfileModalTab === 'expenses') {
-      // 3. Expense History Chronological
+      // 4. Expense History Chronological
       const spends = this.data.expenses
         .filter(e => e.staffName === staffName && !e.isOwnerExpense)
         .sort((a, b) => new Date(b.dateTime) - new Date(a.dateTime));
@@ -732,7 +1021,7 @@ const app = {
         const timeStr = dt.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: false });
 
         const item = document.createElement('div');
-        item.style.cssText = 'background: rgba(255,255,255,0.02); border: 1px solid var(--panel-border); border-radius: 12px; padding: 10px; display: flex; flex-direction: column; gap: 4px;';
+        item.style.cssText = 'background: rgba(255,255,255,0.02); border: 1px solid var(--panel-border); border-radius: 12px; padding: 10px; display: flex; flex-direction: column; gap: 4px; border-left: 3px solid var(--warning);';
         
         item.innerHTML = `
           <div style="display: flex; justify-content: space-between; align-items: center;">
@@ -762,6 +1051,13 @@ const app = {
     this.closeModal('staffLedgerModal');
     setTimeout(() => {
       this.viewReceipt(expenseId);
+    }, 250);
+  },
+
+  viewIncomingProofFromLedger(id) {
+    this.closeModal('staffLedgerModal');
+    setTimeout(() => {
+      this.viewIncomingProof(id);
     }, 250);
   },
 
@@ -821,13 +1117,17 @@ const app = {
 
     const advances = this.data.transactions
       .filter(t => t.staffName === staffName)
-      .map(t => ({ ...t, passType: 'credit' }));
+      .map(t => ({ ...t, passType: 'credit', docType: 'Advance' }));
+
+    const incoming = (this.data.incoming_money || [])
+      .filter(i => i.createdBy === staffName && i.status !== 'Rejected')
+      .map(i => ({ ...i, passType: 'credit', docType: 'Incoming', isPending: i.status === 'Pending Approval' }));
 
     const spends = this.data.expenses
       .filter(e => e.staffName === staffName && !e.isOwnerExpense)
-      .map(e => ({ ...e, passType: 'debit' }));
+      .map(e => ({ ...e, passType: 'debit', docType: 'Expense' }));
 
-    const unified = [...advances, ...spends].sort((a, b) => new Date(a.dateTime) - new Date(b.dateTime));
+    const unified = [...advances, ...incoming, ...spends].sort((a, b) => new Date(a.dateTime) - new Date(b.dateTime));
 
     if (unified.length === 0) {
       container.innerHTML = `<div style="text-align: center; color: var(--text-muted); font-size: 0.75rem; padding: 24px;">Your passbook ledger is empty.</div>`;
@@ -846,11 +1146,22 @@ const app = {
 
       if (item.passType === 'credit') {
         runningBal += item.amount;
+        let label = 'Advance advances credited';
+        let badgeText = 'Credit';
+        let extra = '';
+        if (item.docType === 'Incoming') {
+          label = `Incoming: ${item.receivedFrom}`;
+          badgeText = item.isPending ? 'Pending' : 'Incoming';
+          if (item.isPending) {
+            extra = ` <span style="font-size:0.6rem; color:var(--warning); font-weight:bold;">(Pending Approval)</span>`;
+          }
+        }
+
         row.innerHTML = `
           <div class="passbook-details">
             <span class="passbook-date">${dateStr} ${timeStr}</span>
-            <span class="passbook-desc">Advance advances credited</span>
-            <span class="passbook-type-badge passbook-type-in">Credit</span>
+            <span class="passbook-desc" style="color: var(--accent-blue); font-weight: 600;">${label} ${extra}</span>
+            <span class="passbook-type-badge" style="background: rgba(59, 130, 246, 0.1); color: var(--accent-blue); border-color: rgba(59, 130, 246, 0.2);">${badgeText}</span>
           </div>
           <div class="passbook-amounts">
             <span class="passbook-amount credit">+₹${item.amount.toLocaleString('en-IN')}</span>
@@ -1093,25 +1404,102 @@ const app = {
     const dayTx = this.getFilteredTransactions().filter(t => t.dateTime.split('T')[0] === dateStr);
     // Expenses
     const dayExp = this.getFilteredExpenses().filter(e => e.dateTime.split('T')[0] === dateStr);
+    // Incoming money entries
+    const dayIncoming = (this.data.incoming_money || []).filter(i => {
+      const isDate = i.dateTime.split('T')[0] === dateStr;
+      if (!isDate) return false;
+      if (this.filters.staff && i.createdBy !== this.filters.staff) return false;
+      return true;
+    });
 
-    const totalSent = dayTx.reduce((sum, t) => sum + t.amount, 0);
+    const approvedIncomingSum = dayIncoming
+      .filter(i => i.status === 'Approved')
+      .reduce((sum, i) => sum + i.amount, 0);
+
+    const totalSent = dayTx.reduce((sum, t) => sum + t.amount, 0) + approvedIncomingSum;
     const totalSpent = dayExp.reduce((sum, e) => sum + e.amount, 0);
     const remaining = totalSent - totalSpent;
 
-    // Render Sent Advances
-    if (dayTx.length === 0) {
-      sentContainer.innerHTML = `<div style="font-size:0.75rem; color:var(--text-muted); font-style:italic;">No money sent.</div>`;
+    // Gather chronological events list for the day
+    const events = [];
+
+    // 1. Advances issued by Owner
+    dayTx.forEach(tx => {
+      const dt = new Date(tx.dateTime);
+      const timeStr = dt.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true });
+      const remarks = tx.refNumber ? ` (${tx.refNumber})` : '';
+      events.push({
+        timeSort: tx.dateTime,
+        timeDisplay: timeStr,
+        icon: '💵',
+        color: 'var(--accent-blue)',
+        html: `<strong>Owner sent ₹${tx.amount.toLocaleString('en-IN')} to ${tx.staffName}</strong> via ${tx.mode}${remarks}`
+      });
+    });
+
+    // 2. Incoming Money Entries creation and approvals
+    dayIncoming.forEach(inc => {
+      // Creation Log
+      const cDate = inc.createdAt ? new Date(inc.createdAt) : new Date(inc.dateTime);
+      const cDateStr = cDate.toISOString().split('T')[0];
+      if (cDateStr === dateStr) {
+        const timeStr = cDate.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true });
+        
+        let statusBadge = '';
+        if (inc.status === 'Approved') {
+          statusBadge = '<span style="color: var(--primary); font-weight: bold;">(Approved)</span>';
+        } else if (inc.status === 'Pending Approval') {
+          statusBadge = '<span style="color: var(--warning); font-weight: bold;">(Pending Approval)</span>';
+        } else {
+          statusBadge = '<span style="color: var(--danger); font-weight: bold;">(Rejected)</span>';
+        }
+
+        events.push({
+          timeSort: inc.createdAt || inc.dateTime,
+          timeDisplay: timeStr,
+          icon: '📥',
+          color: 'var(--primary)',
+          html: `<strong>${inc.createdBy} recorded Incoming Money of ₹${inc.amount.toLocaleString('en-IN')} from ${inc.receivedFrom}</strong> ${statusBadge}`
+        });
+      }
+
+      // Audit review Log (Approve / Reject)
+      if (inc.reviewedAt) {
+        const rDate = new Date(inc.reviewedAt);
+        const rDateStr = rDate.toISOString().split('T')[0];
+        if (rDateStr === dateStr) {
+          const timeStr = rDate.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true });
+          const statusVerb = inc.status === 'Approved' ? 'approved' : 'rejected';
+          const icon = inc.status === 'Approved' ? '✅' : '❌';
+          const commentStr = inc.comment ? ` • Comment: "${inc.comment}"` : '';
+
+          events.push({
+            timeSort: inc.reviewedAt,
+            timeDisplay: timeStr,
+            icon: icon,
+            color: inc.status === 'Approved' ? 'var(--primary)' : 'var(--danger)',
+            html: `<strong>${inc.reviewedBy} ${statusVerb} the Incoming Money entry</strong> from ${inc.createdBy}${commentStr}`
+          });
+        }
+      }
+    });
+
+    // Sort events chronologically by timeSort string
+    events.sort((a, b) => new Date(a.timeSort) - new Date(b.timeSort));
+
+    // Render timeline
+    if (events.length === 0) {
+      sentContainer.innerHTML = `<div style="font-size:0.75rem; color:var(--text-muted); font-style:italic;">No money sent or received activities.</div>`;
     } else {
-      dayTx.forEach(tx => {
+      events.forEach(ev => {
         const item = document.createElement('div');
-        item.style.cssText = 'background:rgba(255,255,255,0.01); border:1px solid var(--panel-border); border-radius:10px; padding:8px 10px; display:flex; justify-content:space-between; align-items:center; font-size:0.75rem;';
-        const remarks = tx.refNumber ? `(${tx.refNumber})` : '';
+        item.style.cssText = 'background:rgba(255,255,255,0.01); border:1px solid var(--panel-border); border-radius:10px; padding:8px 10px; display:flex; gap:10px; align-items:center; font-size:0.75rem;';
         item.innerHTML = `
-          <div>
-            <strong>Owner ➔ ${tx.staffName}</strong>
-            <span style="color:var(--text-muted); display:block; font-size:0.65rem;">Mode: ${tx.mode} ${remarks}</span>
+          <div style="font-size: 1.1rem; filter: drop-shadow(0 2px 4px rgba(0,0,0,0.15));">${ev.icon}</div>
+          <div style="flex: 1;">
+            <div style="font-size: 0.65rem; color: var(--text-muted); font-weight: 500;">${ev.timeDisplay}</div>
+            <div style="color: var(--text-primary); margin-top: 1px; line-height: 1.35;">${ev.html}</div>
           </div>
-          <strong style="color:var(--accent-blue);">₹${tx.amount.toLocaleString('en-IN')}</strong>
         `;
         sentContainer.appendChild(item);
       });
@@ -1147,57 +1535,147 @@ const app = {
     this.openModal('dateDetailsModal');
   },
 
-  /* ==================== FEATURE 8: REPORTS & OVERVIEWS ==================== */
   renderReports() {
     const subContent = document.getElementById('reportsSubContent');
     subContent.innerHTML = '';
 
-    // Totals
-    const totalIssued = this.data.transactions.reduce((sum, t) => sum + t.amount, 0);
-    const totalSpent = this.data.expenses.reduce((sum, e) => sum + e.amount, 0);
+    const filterVal = document.getElementById('reportTypeFilter')?.value || 'All';
+
+    // 1. Calculate sums
+    const ownerSentSum = this.data.transactions.reduce((sum, t) => sum + t.amount, 0);
+    const approvedIncomingSum = (this.data.incoming_money || [])
+      .filter(i => i.status === 'Approved')
+      .reduce((sum, i) => sum + i.amount, 0);
+    const expensesSum = this.data.expenses.reduce((sum, e) => sum + e.amount, 0);
+
+    let totalIssued = 0;
+    let totalSpent = 0;
+
+    if (filterVal === 'All') {
+      totalIssued = ownerSentSum + approvedIncomingSum;
+      totalSpent = expensesSum;
+    } else if (filterVal === 'Sent') {
+      totalIssued = ownerSentSum;
+      totalSpent = 0;
+    } else if (filterVal === 'Incoming') {
+      totalIssued = approvedIncomingSum;
+      totalSpent = 0;
+    } else if (filterVal === 'Expenses') {
+      totalIssued = 0;
+      totalSpent = expensesSum;
+    }
+
     const totalBalance = totalIssued - totalSpent;
 
     document.getElementById('reportTotalIssued').textContent = `₹${totalIssued.toLocaleString('en-IN')}`;
     document.getElementById('reportTotalSpent').textContent = `₹${totalSpent.toLocaleString('en-IN')}`;
     document.getElementById('reportTotalBalance').textContent = `₹${totalBalance.toLocaleString('en-IN')}`;
 
-    // Category-wise Breakdown
-    const catMap = {};
-    // Seed standard + owner categories
-    CATEGORIES.forEach(c => catMap[c.name] = 0);
-    COMPANY_EXPENSE_CATEGORIES.forEach(c => catMap[c] = 0);
+    // 2. Render Breakdown based on selected type
+    if (filterVal === 'Expenses' || filterVal === 'All') {
+      // Category breakdown for expenses
+      const catMap = {};
+      CATEGORIES.forEach(c => catMap[c.name] = 0);
+      COMPANY_EXPENSE_CATEGORIES.forEach(c => catMap[c] = 0);
 
-    this.data.expenses.forEach(e => {
-      catMap[e.category] = (catMap[e.category] || 0) + e.amount;
-    });
+      this.data.expenses.forEach(e => {
+        catMap[e.category] = (catMap[e.category] || 0) + e.amount;
+      });
 
-    const sortedCats = Object.entries(catMap)
-      .filter(([_, amt]) => amt > 0)
-      .sort((a, b) => b[1] - a[1]);
+      const sortedCats = Object.entries(catMap)
+        .filter(([_, amt]) => amt > 0)
+        .sort((a, b) => b[1] - a[1]);
 
-    if (sortedCats.length === 0) {
-      subContent.innerHTML = `<div style="text-align:center; padding:12px; color:var(--text-muted); font-size:0.75rem;">No expenses logged to summarize.</div>`;
-      return;
+      if (sortedCats.length === 0) {
+        subContent.innerHTML = `<div style="text-align:center; padding:12px; color:var(--text-muted); font-size:0.75rem;">No expenses to summarize.</div>`;
+        return;
+      }
+
+      sortedCats.forEach(([cat, amt]) => {
+        const isCompanyCat = COMPANY_EXPENSE_CATEGORIES.includes(cat);
+        const emoji = isCompanyCat ? '🏢' : (CATEGORIES.find(c => c.name === cat)?.emoji || '📦');
+        const pct = expensesSum > 0 ? (amt / expensesSum) * 100 : 0;
+
+        const row = document.createElement('div');
+        row.className = 'category-meter';
+        row.innerHTML = `
+          <div class="meter-header">
+            <span>${emoji} ${cat}</span>
+            <strong>₹${amt.toLocaleString('en-IN')} (${pct.toFixed(1)}%)</strong>
+          </div>
+          <div class="meter-bg">
+            <div class="meter-fill" style="width: ${pct}%; background: ${isCompanyCat ? 'var(--accent-blue)' : 'var(--accent-purple)'};"></div>
+          </div>
+        `;
+        subContent.appendChild(row);
+      });
+
+    } else if (filterVal === 'Incoming') {
+      // Breakdown of approved incoming money sources
+      const sourceMap = {};
+      (this.data.incoming_money || [])
+        .filter(i => i.status === 'Approved')
+        .forEach(i => {
+          sourceMap[i.receivedFrom] = (sourceMap[i.receivedFrom] || 0) + i.amount;
+        });
+
+      const sortedSources = Object.entries(sourceMap)
+        .filter(([_, amt]) => amt > 0)
+        .sort((a, b) => b[1] - a[1]);
+
+      if (sortedSources.length === 0) {
+        subContent.innerHTML = `<div style="text-align:center; padding:12px; color:var(--text-muted); font-size:0.75rem;">No approved incoming money recorded.</div>`;
+        return;
+      }
+
+      sortedSources.forEach(([source, amt]) => {
+        const pct = approvedIncomingSum > 0 ? (amt / approvedIncomingSum) * 100 : 0;
+        const row = document.createElement('div');
+        row.className = 'category-meter';
+        row.innerHTML = `
+          <div class="meter-header">
+            <span>📥 ${source}</span>
+            <strong>₹${amt.toLocaleString('en-IN')} (${pct.toFixed(1)}%)</strong>
+          </div>
+          <div class="meter-bg">
+            <div class="meter-fill" style="width: ${pct}%; background: var(--primary);"></div>
+          </div>
+        `;
+        subContent.appendChild(row);
+      });
+
+    } else if (filterVal === 'Sent') {
+      // Breakdown of money issued to staff members
+      const staffMap = {};
+      this.data.transactions.forEach(t => {
+        staffMap[t.staffName] = (staffMap[t.staffName] || 0) + t.amount;
+      });
+
+      const sortedStaff = Object.entries(staffMap)
+        .filter(([_, amt]) => amt > 0)
+        .sort((a, b) => b[1] - a[1]);
+
+      if (sortedStaff.length === 0) {
+        subContent.innerHTML = `<div style="text-align:center; padding:12px; color:var(--text-muted); font-size:0.75rem;">No money sent to staff yet.</div>`;
+        return;
+      }
+
+      sortedStaff.forEach(([name, amt]) => {
+        const pct = ownerSentSum > 0 ? (amt / ownerSentSum) * 100 : 0;
+        const row = document.createElement('div');
+        row.className = 'category-meter';
+        row.innerHTML = `
+          <div class="meter-header">
+            <span>👤 ${name}</span>
+            <strong>₹${amt.toLocaleString('en-IN')} (${pct.toFixed(1)}%)</strong>
+          </div>
+          <div class="meter-bg">
+            <div class="meter-fill" style="width: ${pct}%; background: var(--accent-blue);"></div>
+          </div>
+        `;
+        subContent.appendChild(row);
+      });
     }
-
-    sortedCats.forEach(([cat, amt]) => {
-      const isCompanyCat = COMPANY_EXPENSE_CATEGORIES.includes(cat);
-      const emoji = isCompanyCat ? '🏢' : (CATEGORIES.find(c => c.name === cat)?.emoji || '📦');
-      const pct = totalSpent > 0 ? (amt / totalSpent) * 100 : 0;
-
-      const row = document.createElement('div');
-      row.className = 'category-meter';
-      row.innerHTML = `
-        <div class="meter-header">
-          <span>${emoji} ${cat}</span>
-          <strong>₹${amt.toLocaleString('en-IN')} (${pct.toFixed(1)}%)</strong>
-        </div>
-        <div class="meter-bg">
-          <div class="meter-fill" style="width: ${pct}%; background: ${isCompanyCat ? 'var(--accent-blue)' : 'var(--accent-purple)'};"></div>
-        </div>
-      `;
-      subContent.appendChild(row);
-    });
   },
 
   /* ==================== FEATURE 9: OWNER/COMPANY EXPENSES ==================== */
@@ -1276,6 +1754,7 @@ const app = {
 
     try {
       await window.TrailCashDB.addExpense(newCompanyExp);
+      await this.syncWithServer();
       this.showToast('Company expense recorded successfully!', 'success');
       await this.refreshData();
       this.closeModal('addCompanyExpenseModal');
@@ -1356,6 +1835,7 @@ const app = {
 
     try {
       await window.TrailCashDB.addStaff(newStaff);
+      await this.syncWithServer();
       this.showToast(`Added staff member: ${name}`, 'success');
       await this.refreshData();
       this.closeModal('addStaffModal');
@@ -1430,6 +1910,7 @@ const app = {
         }
       }
 
+      await this.syncWithServer();
       this.showToast('Staff profile updated successfully.', 'success');
       await this.refreshData();
       this.closeModal('editStaffModal');
@@ -1453,6 +1934,7 @@ const app = {
     if (confirm(`Are you sure you want to remove staff member "${staff.name}"? Historical records will be kept.`)) {
       try {
         await window.TrailCashDB.deleteStaff(id);
+        await this.syncWithServer();
         this.showToast(`Staff member "${staff.name}" removed.`, 'success');
         await this.refreshData();
 
@@ -1518,6 +2000,7 @@ const app = {
 
     try {
       await window.TrailCashDB.addCashTransaction(newTx);
+      await this.syncWithServer();
       this.showToast(`Advance advance of ₹${amount.toLocaleString('en-IN')} sent to ${staffName}!`, 'success');
       await this.refreshData();
       this.closeModal('issueCashModal');
@@ -1738,18 +2221,227 @@ const app = {
     try {
       await window.TrailCashDB.addExpense(newExpense);
       
+      await this.syncWithServer();
+      await this.refreshData();
+      
       if (this.isOnline) {
         this.showToast('Expense saved and synced!', 'success');
       } else {
         this.showToast('Offline! Saved locally to draft cache.', 'warning');
       }
 
-      await this.refreshData();
       this.closeModal('addExpenseModal');
       this.updateView();
     } catch (err) {
       console.error(err);
       this.showToast('Failed to save expense.', 'danger');
+    }
+  },
+
+  /* ==================== FEATURE: ADD INCOMING MONEY ==================== */
+  openAddIncomingMoneyModal() {
+    this.tempIncomingProofData = null;
+    document.getElementById('incomingUploadPreview').style.display = 'none';
+    document.getElementById('incomingUploadIcon').style.display = 'block';
+    document.getElementById('incomingUploadText').textContent = 'Upload Payment Proof / Screenshot';
+    
+    document.getElementById('incomingDateInput').value = new Date().toISOString().split('T')[0];
+    const now = new Date();
+    document.getElementById('incomingTimeInput').value = now.toTimeString().split(' ')[0].substring(0, 5);
+
+    document.getElementById('incomingOtherGroup').style.display = 'none';
+    document.getElementById('incomingOtherInput').value = '';
+    document.getElementById('incomingOtherInput').removeAttribute('required');
+
+    document.getElementById('incomingAmountInput').value = '';
+    document.getElementById('incomingNameInput').value = '';
+    document.getElementById('incomingRemarksInput').value = '';
+    document.getElementById('incomingReceivedFromSelect').selectedIndex = 0;
+    document.getElementById('incomingPaymentSelect').selectedIndex = 0;
+
+    this.openModal('addIncomingMoneyModal');
+  },
+
+  handleIncomingReceivedFromChange() {
+    const val = document.getElementById('incomingReceivedFromSelect').value;
+    const otherGroup = document.getElementById('incomingOtherGroup');
+    const otherInput = document.getElementById('incomingOtherInput');
+    if (val === 'Other') {
+      otherGroup.style.display = 'block';
+      otherInput.setAttribute('required', 'true');
+      otherInput.focus();
+    } else {
+      otherGroup.style.display = 'none';
+      otherInput.removeAttribute('required');
+      otherInput.value = '';
+    }
+  },
+
+  triggerIncomingProofUpload() {
+    document.getElementById('incomingProofFileInput').click();
+  },
+
+  handleIncomingProofSelect(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      this.tempIncomingProofData = e.target.result;
+      document.getElementById('incomingUploadIcon').style.display = 'none';
+      const preview = document.getElementById('incomingUploadPreview');
+      preview.src = this.tempIncomingProofData;
+      preview.style.display = 'block';
+      document.getElementById('incomingUploadText').textContent = file.name;
+      this.showToast('Payment proof uploaded successfully.', 'success');
+    };
+    reader.readAsDataURL(file);
+  },
+
+  simulateIncomingProofCapture() {
+    // Generate simulated payment proof screenshot
+    const canvas = document.createElement('canvas');
+    canvas.width = 400;
+    canvas.height = 400;
+    const ctx = canvas.getContext('2d');
+
+    ctx.fillStyle = '#f8fafc';
+    ctx.fillRect(0, 0, 400, 400);
+
+    ctx.fillStyle = '#0f172a';
+    ctx.font = 'bold 18px monospace';
+    ctx.fillText('INCOMING PAYMENT PROOF', 40, 50);
+
+    ctx.font = '12px monospace';
+    ctx.fillText(`STAFF: ${this.currentUser}`, 35, 90);
+    ctx.fillText(`DATE: ${new Date().toLocaleDateString('en-IN')}`, 35, 120);
+    ctx.fillText(`FROM: ${document.getElementById('incomingNameInput').value || 'Customer'}`, 35, 140);
+    ctx.fillText(`AMT: ₹${document.getElementById('incomingAmountInput').value || '2,000'}`, 35, 170);
+
+    ctx.strokeStyle = '#059669';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.arc(200, 250, 40, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.fillStyle = '#059669';
+    ctx.font = 'bold 10px monospace';
+    ctx.fillText('SUCCESSFUL', 170, 245);
+    ctx.fillText('BANK VERIFIED', 160, 260);
+
+    this.tempIncomingProofData = canvas.toDataURL('image/jpeg');
+
+    document.getElementById('incomingUploadIcon').style.display = 'none';
+    const preview = document.getElementById('incomingUploadPreview');
+    preview.src = this.tempIncomingProofData;
+    preview.style.display = 'block';
+    document.getElementById('incomingUploadText').textContent = 'Simulated screenshot generated!';
+    this.showToast('Payment proof screenshot simulated successfully.', 'success');
+  },
+
+  clearIncomingProof() {
+    this.tempIncomingProofData = null;
+    document.getElementById('incomingUploadPreview').style.display = 'none';
+    document.getElementById('incomingUploadIcon').style.display = 'block';
+    document.getElementById('incomingUploadText').textContent = 'Upload Payment Proof / Screenshot';
+    this.showToast('Payment proof removed.', 'warning');
+  },
+
+  async saveIncomingMoney(event) {
+    event.preventDefault();
+
+    const amount = parseFloat(document.getElementById('incomingAmountInput').value);
+    const receivedFromVal = document.getElementById('incomingReceivedFromSelect').value;
+    const customReceivedFrom = document.getElementById('incomingOtherInput').value.trim();
+    const name = document.getElementById('incomingNameInput').value.trim();
+    const paymentMethod = document.getElementById('incomingPaymentSelect').value;
+    const remarks = document.getElementById('incomingRemarksInput').value.trim();
+    const dateVal = document.getElementById('incomingDateInput').value;
+    const timeVal = document.getElementById('incomingTimeInput').value;
+
+    if (isNaN(amount) || amount <= 0) {
+      this.showToast('Please enter a valid amount.', 'warning');
+      return;
+    }
+
+    const finalReceivedFrom = receivedFromVal === 'Other' ? customReceivedFrom : receivedFromVal;
+    const dateTime = `${dateVal}T${timeVal || '12:00'}:00`;
+
+    const newRecord = {
+      id: 'inc-' + Date.now(),
+      dateTime,
+      amount,
+      receivedFrom: finalReceivedFrom,
+      receivedFromCategory: receivedFromVal,
+      customReceivedFrom: receivedFromVal === 'Other' ? customReceivedFrom : null,
+      name,
+      paymentMethod,
+      remarks,
+      proofPhoto: this.tempIncomingProofData,
+      status: 'Pending Approval',
+      createdBy: this.currentUser,
+      createdAt: new Date().toISOString(),
+      reviewedBy: null,
+      reviewedAt: null,
+      comment: null
+    };
+
+    try {
+      await window.TrailCashDB.addIncomingMoney(newRecord);
+      this.showToast('Incoming money saved as Pending Approval!', 'success');
+      
+      await this.syncWithServer();
+      await this.refreshData();
+
+      this.closeModal('addIncomingMoneyModal');
+      this.updateView();
+    } catch (err) {
+      console.error(err);
+      this.showToast('Failed to save incoming money.', 'danger');
+    }
+  },
+
+  async approveIncomingMoney(id, comment) {
+    const record = this.data.incoming_money.find(i => i.id === id);
+    if (!record) return;
+
+    record.status = 'Approved';
+    record.reviewedBy = this.currentUser;
+    record.reviewedAt = new Date().toISOString();
+    record.comment = comment || null;
+
+    try {
+      await window.TrailCashDB.updateIncomingMoney(record);
+      this.showToast('Transaction approved!', 'success');
+
+      await this.syncWithServer();
+      await this.refreshData();
+      this.updateView();
+    } catch (err) {
+      console.error(err);
+      this.showToast('Failed to approve transaction.', 'danger');
+    }
+  },
+
+  async rejectIncomingMoney(id, comment) {
+    const record = this.data.incoming_money.find(i => i.id === id);
+    if (!record) return;
+
+    record.status = 'Rejected';
+    record.reviewedBy = this.currentUser;
+    record.reviewedAt = new Date().toISOString();
+    record.comment = comment || null;
+
+    try {
+      await window.TrailCashDB.updateIncomingMoney(record);
+      this.showToast('Transaction rejected.', 'warning');
+
+      await this.syncWithServer();
+      await this.refreshData();
+      this.updateView();
+    } catch (err) {
+      console.error(err);
+      this.showToast('Failed to reject transaction.', 'danger');
     }
   },
 

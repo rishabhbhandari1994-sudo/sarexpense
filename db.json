@@ -1,0 +1,63 @@
+{
+  "staff": [
+    {
+      "id": "staff-bonus",
+      "name": "Bonus",
+      "pin": "1234",
+      "role": "Staff",
+      "status": "Active"
+    },
+    {
+      "id": "staff-devraj",
+      "name": "Devraj",
+      "pin": "1234",
+      "role": "Staff",
+      "status": "Active"
+    },
+    {
+      "id": "staff-mayank",
+      "name": "Mayank",
+      "pin": "1234",
+      "role": "Staff",
+      "status": "Active"
+    },
+    {
+      "id": "staff-rishabh",
+      "name": "Rishabh",
+      "pin": "1111",
+      "role": "Owner",
+      "status": "Active"
+    },
+    {
+      "id": "staff-shubham",
+      "name": "Shubham",
+      "pin": "1234",
+      "role": "Staff",
+      "status": "Active"
+    },
+    {
+      "id": "staff-upendra",
+      "name": "Upendra",
+      "pin": "1234",
+      "role": "Staff",
+      "status": "Active"
+    },
+    {
+      "id": "staff-yash",
+      "name": "Yash",
+      "pin": "1234",
+      "role": "Staff",
+      "status": "Active"
+    },
+    {
+      "id": "staff-yashpal",
+      "name": "Yashpal",
+      "pin": "1234",
+      "role": "Staff",
+      "status": "Active"
+    }
+  ],
+  "transactions": [],
+  "expenses": [],
+  "incoming_money": []
+}

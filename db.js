@@ -1,7 +1,7 @@
 // db.js - IndexedDB wrapper for TrailCash with Transparent Fallbacks
 
 const DB_NAME = 'TrailCashDB';
-const DB_VERSION = 6;
+const DB_VERSION = 7;
 
 let dbInstance = null;
 let useInMemoryFallback = false;
@@ -26,7 +26,8 @@ const inMemoryData = {
   cash_transactions: [],
   expenses: [],
   staff: [...DEFAULT_STAFF],
-  notes: []
+  notes: [],
+  incoming_money: []
 };
 
 function getDB() {
@@ -82,6 +83,11 @@ function getDB() {
         // Create Notes store
         if (!db.objectStoreNames.contains('notes')) {
           db.createObjectStore('notes', { keyPath: 'id' });
+        }
+
+        // Create Incoming Money store
+        if (!db.objectStoreNames.contains('incoming_money')) {
+          db.createObjectStore('incoming_money', { keyPath: 'id' });
         }
       } catch (err) {
         console.error('Error in onupgradeneeded:', err);
@@ -297,25 +303,99 @@ const db = {
       });
   },
 
+  // Incoming Money
+  getIncomingMoney() {
+    if (useInMemoryFallback) return Promise.resolve(inMemoryData.incoming_money || []);
+    return runTx('incoming_money', 'readonly', (store) => prom(store.getAll()))
+      .catch(err => {
+        console.warn('getIncomingMoney failed, falling back to in-memory:', err);
+        useInMemoryFallback = true;
+        return Promise.resolve(inMemoryData.incoming_money || []);
+      });
+  },
+  addIncomingMoney(record) {
+    if (useInMemoryFallback) {
+      if (!inMemoryData.incoming_money) inMemoryData.incoming_money = [];
+      const idx = inMemoryData.incoming_money.findIndex(r => r.id === record.id);
+      if (idx >= 0) inMemoryData.incoming_money[idx] = record;
+      else inMemoryData.incoming_money.push(record);
+      return Promise.resolve(record);
+    }
+    return runTx('incoming_money', 'readwrite', (store) => prom(store.put(record)))
+      .catch(err => {
+        console.warn('addIncomingMoney failed, falling back to in-memory:', err);
+        useInMemoryFallback = true;
+        return this.addIncomingMoney(record);
+      });
+  },
+  updateIncomingMoney(record) {
+    return this.addIncomingMoney(record);
+  },
+  deleteIncomingMoney(id) {
+    if (useInMemoryFallback) {
+      if (!inMemoryData.incoming_money) inMemoryData.incoming_money = [];
+      inMemoryData.incoming_money = inMemoryData.incoming_money.filter(r => r.id !== id);
+      return Promise.resolve(id);
+    }
+    return runTx('incoming_money', 'readwrite', (store) => prom(store.delete(id)))
+      .catch(err => {
+        console.warn('deleteIncomingMoney failed, falling back to in-memory:', err);
+        useInMemoryFallback = true;
+        return this.deleteIncomingMoney(id);
+      });
+  },
+
   // Reset all transaction, expense, and note data (keeping staff roster intact)
   resetAllData() {
     if (useInMemoryFallback) {
       inMemoryData.cash_transactions = [];
       inMemoryData.expenses = [];
       inMemoryData.notes = [];
+      inMemoryData.incoming_money = [];
       return Promise.resolve();
     }
     return Promise.all([
       runTx('cash_transactions', 'readwrite', (store) => prom(store.clear())),
       runTx('expenses', 'readwrite', (store) => prom(store.clear())),
-      runTx('notes', 'readwrite', (store) => prom(store.clear()))
+      runTx('notes', 'readwrite', (store) => prom(store.clear())),
+      runTx('incoming_money', 'readwrite', (store) => prom(store.clear()))
     ]).catch(err => {
       console.warn('resetAllData failed, falling back to in-memory reset:', err);
       useInMemoryFallback = true;
       inMemoryData.cash_transactions = [];
       inMemoryData.expenses = [];
       inMemoryData.notes = [];
+      inMemoryData.incoming_money = [];
     });
+  },
+
+  // Overwrite all local database tables with merged lists
+  overwriteAllLocalData(staffList, txList, expList, incomingList = []) {
+    if (useInMemoryFallback) {
+      inMemoryData.staff = [...staffList];
+      inMemoryData.cash_transactions = [...txList];
+      inMemoryData.expenses = [...expList];
+      inMemoryData.incoming_money = [...incomingList];
+      return Promise.resolve();
+    }
+    return Promise.all([
+      runTx('staff', 'readwrite', (store) => {
+        store.clear();
+        staffList.forEach(s => store.put(s));
+      }),
+      runTx('cash_transactions', 'readwrite', (store) => {
+        store.clear();
+        txList.forEach(t => store.put(t));
+      }),
+      runTx('expenses', 'readwrite', (store) => {
+        store.clear();
+        expList.forEach(e => store.put(e));
+      }),
+      runTx('incoming_money', 'readwrite', (store) => {
+        store.clear();
+        incomingList.forEach(i => store.put(i));
+      })
+    ]);
   },
 
   // Initialize and Seed Data if empty
