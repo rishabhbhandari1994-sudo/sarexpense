@@ -1,0 +1,756 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>TrailCash - Field Cash Management</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <div class="app-container">
+    <!-- Flashing Emergency Alert Banner -->
+    <div id="emergencyAlertBanner" class="emergency-alert-banner" style="display: none;" onclick="app.dismissEmergencyAlert()">
+      <div style="display: flex; align-items: center; justify-content: space-between; width: 100%;">
+        <div style="display: flex; align-items: center; gap: 8px; font-weight: bold;">
+          <span>🚨</span>
+          <span id="emergencyAlertText">Emergency alert notice...</span>
+        </div>
+        <span style="font-weight: bold; cursor: pointer; font-size: 1.1rem; padding: 0 4px;">&times;</span>
+      </div>
+    </div>
+
+    <!-- Header -->
+    <header>
+      <div class="header-top">
+        <div class="brand">
+          <!-- Mountain SVG Icon -->
+          <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m8 3 4 8 5-5 5 15H2L8 3z"/></svg>
+          <h1 data-i18n="brandName">TrailCash</h1>
+        </div>
+        
+        <div style="display: flex; gap: 6px; align-items: center;">
+          <!-- Language Toggle Button -->
+          <button id="langToggleBtn" class="network-toggle" onclick="app.toggleLanguage()" style="color: var(--text-primary); border-color: rgba(255,255,255,0.15);">
+            <span>🌐 EN</span>
+          </button>
+
+          <!-- Theme Toggle Button -->
+          <button id="themeToggleBtn" class="network-toggle" onclick="app.toggleTheme()" style="color: var(--text-primary); border-color: rgba(255,255,255,0.15); padding: 4px 6px;">
+            <span>🌓</span>
+          </button>
+
+          <!-- Interactive Offline Test Mode Switch -->
+          <button id="networkToggleBtn" class="network-toggle online" onclick="app.toggleNetwork()">
+            <span class="status-dot"></span>
+            <span id="networkText" data-i18n="onlineSynced">Online / Synced</span>
+          </button>
+        </div>
+      </div>
+      
+      <!-- Role Switcher & Secure Logout -->
+      <div class="role-switcher-container" style="justify-content: space-between; align-items: center;">
+        <div style="display: flex; align-items: center; gap: 8px;">
+          <span class="role-label" data-i18n="roleLabel">Role:</span>
+          <span id="headerActiveRoleName" style="font-size: 0.8rem; font-weight: 600; color: var(--primary);">Rishabh</span>
+        </div>
+        <button class="network-toggle" onclick="app.logoutUser()" style="color: var(--danger); border-color: rgba(239,68,68,0.3); font-weight: 600; padding: 4px 10px; display: flex; align-items: center; gap: 4px;">
+          <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+          <span data-i18n="logoutText">Logout</span>
+        </button>
+      </div>
+    </header>
+
+    <!-- Main Scrollable Content Area -->
+    <main class="content-area" id="mainContent">
+      
+      <!-- SCREEN: OWNER DATE-WISE DASHBOARD (HOME) -->
+      <div id="ownerHomeTab" class="tab-content">
+        <!-- Search & Filter Card -->
+        <div class="card" style="margin-bottom: 12px; gap: 8px; border-color: rgba(16, 185, 129, 0.15);">
+          <div style="font-weight: 700; font-size: 0.85rem; color: var(--primary); display: flex; align-items: center; gap: 6px; margin-bottom: 4px;">
+            <span>🔍</span> <span>Search & Filter Activities</span>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label">Search text</label>
+              <input type="text" id="ownerSearchInput" class="form-input" placeholder="Staff, Category, Details..." oninput="app.updateDashboardView()">
+            </div>
+            <div class="form-group">
+              <label class="form-label">Staff Member</label>
+              <select id="filterStaffSelect" class="form-input" onchange="app.updateDashboardView()">
+                <option value="">All Staff</option>
+              </select>
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label">Category</label>
+              <select id="filterCategorySelect" class="form-input" onchange="app.updateDashboardView()">
+                <option value="">All Categories</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label class="form-label">Date Range</label>
+              <div style="display: flex; gap: 4px;">
+                <input type="date" id="filterStartDate" class="form-input" style="padding: 6px; font-size: 0.75rem; flex: 1;" onchange="app.updateDashboardView()">
+                <input type="date" id="filterEndDate" class="form-input" style="padding: 6px; font-size: 0.75rem; flex: 1;" onchange="app.updateDashboardView()">
+              </div>
+            </div>
+          </div>
+          <div style="display: flex; justify-content: flex-end;">
+            <span onclick="app.clearOwnerFilters()" style="font-size: 0.7rem; color: var(--danger); cursor: pointer; font-weight: 600;">Clear Filters</span>
+          </div>
+        </div>
+
+        <!-- Section Title with Give Cash Action -->
+        <div class="section-title">
+          <span>Date-wise Activity</span>
+          <div style="display: flex; gap: 8px;">
+            <span onclick="app.openIssueCashModal()" style="font-weight: 600; color: var(--accent-blue);">+ Send Money</span>
+          </div>
+        </div>
+
+        <!-- Date-wise cards container -->
+        <div id="dateCardsContainer" style="display: flex; flex-direction: column; gap: 12px;">
+          <!-- Dynamically populated date cards -->
+        </div>
+
+        <!-- Company Balance Sheet at the bottom -->
+        <div class="card glow-primary" style="margin-top: 16px; background: rgba(16, 185, 129, 0.03);">
+          <div style="font-family: var(--font-display); font-weight: 700; font-size: 0.9rem; margin-bottom: 4px; color: var(--primary);">Company Balance Summary</div>
+          <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; text-align: center; font-size: 0.75rem;">
+            <div>
+              <div style="color: var(--text-secondary);">Total Issued</div>
+              <strong id="companyTotalIssued" style="color: var(--accent-blue); font-size: 0.9rem;">₹0</strong>
+            </div>
+            <div>
+              <div style="color: var(--text-secondary);">Total Spent</div>
+              <strong id="companyTotalSpent" style="color: var(--warning); font-size: 0.9rem;">₹0</strong>
+            </div>
+            <div>
+              <div style="color: var(--text-secondary);">Current Cash</div>
+              <strong id="companyTotalBalance" style="color: var(--primary); font-size: 0.9rem;">₹0</strong>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- SCREEN: OWNER DASHBOARD (STAFF BALANCES CARDS) -->
+      <div id="ownerBalancesTab" class="tab-content" style="display: none;">
+        <div class="section-title">
+          <span>Staff Available Balances</span>
+          <span onclick="app.openIssueCashModal()">+ Send Money</span>
+        </div>
+        <div id="ownerStaffCardsContainer" style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+          <!-- Dynamically populated with one card per staff member -->
+        </div>
+      </div>
+
+      <!-- SCREEN: OWNER REPORTS & COMPANY EXPENSES -->
+      <div id="ownerReportsTab" class="tab-content" style="display: none;">
+        <!-- Reports Summary Stats Card -->
+        <div class="stats-grid">
+          <div class="stat-box">
+            <div class="stat-label">Total Issued</div>
+            <div class="stat-value blue" id="reportTotalIssued">₹0</div>
+          </div>
+          <div class="stat-box">
+            <div class="stat-label">Total Spent</div>
+            <div class="stat-value warning" id="reportTotalSpent">₹0</div>
+          </div>
+          <div class="stat-box">
+            <div class="stat-label">Current Cash</div>
+            <div class="stat-value primary" id="reportTotalBalance">₹0</div>
+          </div>
+        </div>
+
+        <!-- Exports & Actions -->
+        <div style="display: flex; gap: 8px; margin-top: 12px;">
+          <button class="btn btn-secondary" onclick="app.exportToCSV()" style="flex: 1; font-size: 0.75rem; padding: 8px;">
+            <span>📊</span> Export to Excel
+          </button>
+          <button class="btn btn-secondary" onclick="app.exportToPDF()" style="flex: 1; font-size: 0.75rem; padding: 8px;">
+            <span>📄</span> Export to PDF
+          </button>
+        </div>
+
+        <!-- Category Breakdown Chart/Meter -->
+        <div class="card" style="margin-top: 12px;">
+          <div class="section-title">Category-wise Summary</div>
+          <div id="reportsSubContent" class="report-section">
+            <!-- Dynamically populated with category-wise progress bars -->
+          </div>
+        </div>
+
+        <!-- Owner Company Expenses Section -->
+        <div class="card" style="margin-top: 12px; border-color: rgba(59, 130, 246, 0.2);">
+          <div class="section-title">
+            <span>🏢 Company Office Expenses</span>
+            <span onclick="app.openAddCompanyExpenseModal()">+ Add Company Expense</span>
+          </div>
+          <div style="font-size: 0.7rem; color: var(--text-secondary); margin-bottom: 4px;">
+            Record non-staff corporate overhead (Rent, Salary, Marketing, Travel, Internet, etc.).
+          </div>
+          <div id="ownerExpensesContainer" style="display: flex; flex-direction: column; gap: 8px; max-height: 200px; overflow-y: auto;">
+            <!-- Dynamically populated company expenses -->
+          </div>
+        </div>
+      </div>
+
+      <!-- SCREEN: OWNER STAFF MANAGEMENT (ROSTER) -->
+      <div id="ownerStaffTab" class="tab-content" style="display: none;">
+        <div class="card">
+          <div class="section-title">
+            <span data-i18n="manageStaffTitle">Manage Staff Roster</span>
+            <span onclick="app.openAddStaffModal()" data-i18n="addStaffBtn">+ Add Staff</span>
+          </div>
+          <div style="font-size: 0.75rem; color: var(--text-secondary); margin-bottom: 8px;" data-i18n="manageStaffSubtitle">
+            Add new staff members or edit/remove existing ones. Historical records remain preserved.
+          </div>
+          <div id="manageStaffContainer" style="display: flex; flex-direction: column; gap: 8px;">
+            <!-- Populated dynamically in app.js -->
+          </div>
+        </div>
+      </div>
+
+      <!-- SCREEN: OWNER SETTINGS & RESET DATA -->
+      <div id="ownerSettingsTab" class="tab-content" style="display: none;">
+        <div class="card">
+          <div class="section-title">Settings & System Tools</div>
+          
+          <div style="display: flex; flex-direction: column; gap: 14px;">
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+              <div>
+                <strong style="font-size: 0.85rem; display: block;">Theme Selection</strong>
+                <span style="font-size: 0.7rem; color: var(--text-secondary);">Toggle Dark Mode and Light Mode</span>
+              </div>
+              <button class="btn btn-secondary" onclick="app.toggleTheme()" style="padding: 6px 14px; font-size: 0.75rem;">
+                Toggle Theme 🌓
+              </button>
+            </div>
+            
+            <div style="border-top: 1px solid rgba(255,255,255,0.05); padding-top: 14px; display: flex; flex-direction: column; gap: 8px;">
+              <div>
+                <strong style="font-size: 0.85rem; color: var(--danger); display: block;">Reset System Data</strong>
+                <span style="font-size: 0.7rem; color: var(--text-secondary);">Deletes all transactions, expenses, bills, and resets balances. Keeps the staff list.</span>
+              </div>
+              <button class="btn btn-danger" onclick="app.resetAllSystemData()" style="padding: 10px; font-size: 0.8rem; width: 100%;">
+                ⚠ Reset All Data
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- SCREEN: STAFF DASHBOARD -->
+      <div id="staffHomeTab" class="tab-content" style="display: none;">
+        <!-- Staff Stats Summary -->
+        <div class="stats-grid">
+          <div class="stat-box">
+            <div class="stat-label" data-i18n="myCashLimit">My Cash Limit</div>
+            <div class="stat-value blue" id="staffLimitVal">₹0</div>
+          </div>
+          <div class="stat-box">
+            <div class="stat-label" data-i18n="totalSpent">Total Spent</div>
+            <div class="stat-value warning" id="staffSpentVal">₹0</div>
+          </div>
+          <div class="stat-box">
+            <div class="stat-label" data-i18n="remainingBalance">Remaining Balance</div>
+            <div class="stat-value primary" id="staffRemainingVal">₹0</div>
+          </div>
+        </div>
+
+        <!-- Unsynced Warning Banner -->
+        <div id="offlineSyncBanner" class="card" style="border-color: var(--warning); display: none; background: rgba(245, 158, 11, 0.05); margin-top: 12px;">
+          <div style="display: flex; justify-content: space-between; align-items: center;">
+            <div style="display: flex; align-items: center; gap: 8px; font-size: 0.8rem; font-weight: 600; color: var(--warning);">
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 1v22h22L1 1Z"/><path d="M16.72 11.06A10.94 10.94 0 0 1 19 12.5"/><path d="m5 12.5 1.5-1.5"/></svg>
+              <span id="unsyncedCountLabel">3 Unsynced Expenses Saved Locally</span>
+            </div>
+            <button class="btn" style="padding: 6px 12px; font-size: 0.75rem; background: var(--warning);" onclick="app.forceSyncSimulation()">Sync Now</button>
+          </div>
+        </div>
+
+        <!-- Staff Running Passbook Ledger -->
+        <div class="card glow-primary" style="margin-top: 12px;">
+          <div class="section-title">
+            <span>Running Cash Passbook</span>
+          </div>
+          
+          <div id="staffPassbookContainer" style="display: flex; flex-direction: column; gap: 8px; max-height: 400px; overflow-y: auto;">
+            <!-- Dynamically populated like a bank passbook -->
+          </div>
+        </div>
+
+        <!-- Staff Add Expense FAB -->
+        <button class="fab" onclick="app.openAddExpenseModal()" title="Log Expense">
+          <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        </button>
+      </div>
+
+    </main>
+
+    <!-- Bottom Navigation Bar for Owner -->
+    <nav class="bottom-nav" id="ownerBottomNav" style="grid-template-columns: repeat(5, 1fr);">
+      <a class="nav-item active" id="navHomeBtn" onclick="app.switchOwnerTab('home')">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+        <span>Dates</span>
+      </a>
+      <a class="nav-item" id="navBalancesBtn" onclick="app.switchOwnerTab('balances')">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+        <span>Balances</span>
+      </a>
+      <a class="nav-item" id="navReportsBtn" onclick="app.switchOwnerTab('reports')">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+        <span>Reports</span>
+      </a>
+      <a class="nav-item" id="navStaffBtn" onclick="app.switchOwnerTab('staff')">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/></svg>
+        <span>Roster</span>
+      </a>
+      <a class="nav-item" id="navSettingsBtn" onclick="app.switchOwnerTab('settings')">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        <span>Settings</span>
+      </a>
+    </nav>
+
+    <!-- ==================== MODALS ==================== -->
+
+    <!-- MODAL: ADD EXPENSE -->
+    <div class="modal-overlay" id="addExpenseModal">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h2 class="modal-title">Log Field Expense</h2>
+          <button class="modal-close" onclick="app.closeModal('addExpenseModal')">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        </div>
+
+        <form id="addExpenseForm" onsubmit="app.saveExpense(event)">
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label" data-i18n="expenseDateLabel">Expense Date</label>
+              <input type="date" class="form-input" id="expenseDateInput" required>
+            </div>
+            <div class="form-group">
+              <label class="form-label">Expense Time</label>
+              <input type="time" class="form-input" id="expenseTimeInput" required>
+            </div>
+          </div>
+
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label" data-i18n="amountLabel">Amount (₹)</label>
+              <input type="number" class="form-input" id="expenseAmountInput" placeholder="e.g. 1500" required>
+            </div>
+            <div class="form-group">
+              <label class="form-label" data-i18n="paymentMethodLabel">Payment Method</label>
+              <select class="form-input" id="expensePaymentSelect" required>
+                <option value="Cash" selected data-i18n="cashOption">Cash</option>
+                <option value="UPI" data-i18n="upiOption">UPI</option>
+                <option value="Bank" data-i18n="bankOption">Bank</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" data-i18n="categoryLabel">Category</label>
+            <div class="category-grid" id="categoryGrid">
+              <!-- Filled in app.js with category choices -->
+            </div>
+            <input type="hidden" id="selectedCategory" value="" required>
+          </div>
+
+          <!-- Specify Other Group (Hidden by default) -->
+          <div class="form-group" id="otherCategoryGroup" style="display: none; margin-bottom: 4px;">
+            <label class="form-label" data-i18n="specifyOtherLabel">Specify Category/Item Name</label>
+            <input type="text" class="form-input" id="expenseOtherInput" placeholder="e.g. Rope, Bridge Toll" data-i18n-placeholder="specifyOtherPlaceholder">
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" data-i18n="vendorNameLabel">Vendor Name</label>
+            <input type="text" class="form-input" id="expenseVendorInput" placeholder="e.g. Ghangaria Homestay" data-i18n-placeholder="vendorPlaceholder" required>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label" data-i18n="shortDescLabel">Short Description</label>
+            <input type="text" class="form-input" id="expenseDescInput" placeholder="Rice, Dal, Oil, Tea" data-i18n-placeholder="descPlaceholder" required>
+          </div>
+
+          <!-- Receipt Capture -->
+          <div class="form-group">
+            <label class="form-label" data-i18n="receiptPhotoLabel">Receipt Photo (Required/Simulated)</label>
+            <div class="upload-placeholder" onclick="app.triggerReceiptUpload()">
+              <svg id="uploadIcon" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+              <span id="uploadText" data-i18n="uploadText">Take Photo / Upload Bill Receipt</span>
+              <img id="uploadPreview" class="upload-preview-img" style="display: none;" src="" alt="Receipt Preview">
+              <input type="file" id="receiptFileInput" style="display: none;" accept="image/*" onchange="app.handleReceiptFileSelect(event)">
+            </div>
+            <div style="display: flex; gap: 8px; margin-top: 4px;">
+              <button type="button" class="btn btn-secondary" style="padding: 6px 12px; font-size: 0.75rem; flex: 1;" onclick="app.simulateCameraCapture()" data-i18n="simulateCameraBtn">Simulate Camera Snapping</button>
+              <button type="button" class="btn btn-secondary" style="padding: 6px 12px; font-size: 0.75rem; flex: 1; border-color: var(--danger); color: var(--danger);" onclick="app.skipReceiptFile()" data-i18n="skipBillBtn">Skip Bill (For mule/porter)</button>
+            </div>
+          </div>
+
+          <!-- GPS Location -->
+          <div class="form-group" style="margin-top: 4px;">
+            <div class="gps-pill active" id="gpsIndicator">
+              <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0Z"/><circle cx="12" cy="10" r="3"/></svg>
+              <span id="gpsStatus">📍 Ghangaria (30.6974, 79.5932)</span>
+            </div>
+          </div>
+
+          <div style="margin-top: 16px;">
+            <button type="submit" class="btn" style="width: 100%;" data-i18n="saveExpenseSubmitBtn">Save Expense</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- MODAL: ISSUE CASH (SEND MONEY) -->
+    <div class="modal-overlay" id="issueCashModal">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h2 class="modal-title">Send Money to Staff</h2>
+          <button class="modal-close" onclick="app.closeModal('issueCashModal')">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        </div>
+        <form onsubmit="app.saveIssuedCash(event)">
+          <div class="form-group">
+            <label class="form-label">Staff Member (Receiver)</label>
+            <select class="form-input" id="cashStaffSelect" required></select>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label">Date</label>
+              <input type="date" class="form-input" id="cashDateInput" required>
+            </div>
+            <div class="form-group">
+              <label class="form-label">Time</label>
+              <input type="time" class="form-input" id="cashTimeInput" required>
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label">Amount (₹)</label>
+              <input type="number" class="form-input" id="cashAmountInput" placeholder="e.g. 15000" required>
+            </div>
+            <div class="form-group">
+              <label class="form-label">Payment Mode</label>
+              <select class="form-input" id="cashModeSelect" required>
+                <option value="UPI">UPI</option>
+                <option value="Bank">Bank Transfer</option>
+                <option value="Cash" selected>Cash</option>
+              </select>
+            </div>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Remarks (Optional)</label>
+            <input type="text" class="form-input" id="cashRefInput" placeholder="e.g. Valley Advance advance / Remarks">
+          </div>
+          <div style="margin-top: 16px;">
+            <button type="submit" class="btn" style="width: 100%;">Record Money Sent</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- MODAL: ADD STAFF -->
+    <div class="modal-overlay" id="addStaffModal">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h2 class="modal-title">Add New Staff Member</h2>
+          <button class="modal-close" onclick="app.closeModal('addStaffModal')">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        </div>
+        <form onsubmit="app.saveAddStaff(event)">
+          <div class="form-group">
+            <label class="form-label">Staff Name</label>
+            <input type="text" class="form-input" id="newStaffNameInput" placeholder="e.g. Amit" required>
+          </div>
+          <div class="form-group">
+            <label class="form-label">PIN (4-Digits)</label>
+            <input type="text" pattern="[0-9]{4}" class="form-input" id="newStaffPinInput" placeholder="e.g. 9090" required>
+            <span style="font-size: 0.65rem; color: var(--text-muted);">Must be exactly 4 numeric digits.</span>
+          </div>
+          <div style="margin-top: 16px;">
+            <button type="submit" class="btn" style="width: 100%;">Save Staff Member</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- MODAL: EDIT STAFF -->
+    <div class="modal-overlay" id="editStaffModal">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h2 class="modal-title">Edit Staff Profile</h2>
+          <button class="modal-close" onclick="app.closeModal('editStaffModal')">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        </div>
+        <form onsubmit="app.saveEditStaff(event)">
+          <input type="hidden" id="editStaffId">
+          <div class="form-group">
+            <label class="form-label">Staff Name</label>
+            <input type="text" class="form-input" id="editStaffNameInput" required>
+          </div>
+          <div class="form-group">
+            <label class="form-label">PIN (4-Digits)</label>
+            <input type="text" pattern="[0-9]{4}" class="form-input" id="editStaffPinInput" required>
+            <span style="font-size: 0.65rem; color: var(--text-muted);">Must be exactly 4 numeric digits.</span>
+          </div>
+          <div style="margin-top: 16px; display: flex; gap: 8px;">
+            <button type="button" class="btn btn-secondary" onclick="app.closeModal('editStaffModal')" style="flex: 1;">Cancel</button>
+            <button type="submit" class="btn" style="flex: 2;">Save Changes</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- MODAL: STAFF PROFILE DETAILS (INDIVIDUAL STAFF LEDGER) -->
+    <div class="modal-overlay" id="staffLedgerModal">
+      <div class="modal-content" style="max-height: 90%;">
+        <div class="modal-header">
+          <h2 class="modal-title"><span id="indivStaffTitleName">Devraj</span>'s Profile & Ledger</h2>
+          <button class="modal-close" onclick="app.closeModal('staffLedgerModal')">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        </div>
+        
+        <!-- Summary Stats Card -->
+        <div class="card" style="background: rgba(255,255,255,0.02); padding: 12px; gap: 8px;">
+          <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; text-align: center; font-size: 0.75rem;">
+            <div>
+              <div style="color: var(--text-secondary); font-size: 0.6rem;">Received</div>
+              <strong id="indivStaffIssued" style="color: var(--accent-blue);">₹0</strong>
+            </div>
+            <div>
+              <div style="color: var(--text-secondary); font-size: 0.6rem;">Spent</div>
+              <strong id="indivStaffSpent" style="color: var(--warning);">₹0</strong>
+            </div>
+            <div>
+              <div style="color: var(--text-secondary); font-size: 0.6rem;">Balance</div>
+              <strong id="indivStaffRemaining" style="color: var(--primary);">₹0</strong>
+            </div>
+            <div>
+              <div style="color: var(--text-secondary); font-size: 0.6rem;">Expenses</div>
+              <strong id="indivStaffCount" style="color: var(--accent-purple);">0</strong>
+            </div>
+          </div>
+        </div>
+
+        <!-- Ledger View Section Toggle Chips -->
+        <div style="display: flex; gap: 6px; margin-top: 8px;">
+          <button class="role-chip active" id="profileTabPassbookBtn" onclick="app.switchProfileModalTab('passbook')">Ledger Passbook</button>
+          <button class="role-chip" id="profileTabReceivedBtn" onclick="app.switchProfileModalTab('received')">Money History</button>
+          <button class="role-chip" id="profileTabExpensesBtn" onclick="app.switchProfileModalTab('expenses')">Expense History</button>
+        </div>
+
+        <div style="display: flex; gap: 8px; margin-top: 4px;">
+          <button class="btn btn-secondary" onclick="app.exportStaffLedgerCSV()" style="flex: 1; padding: 6px; font-size: 0.7rem; display: flex; align-items: center; justify-content: center; gap: 4px;">
+            <span>📊</span> Export Ledger (CSV)
+          </button>
+          <button class="btn btn-secondary" onclick="app.exportStaffLedgerPDF()" style="flex: 1; padding: 6px; font-size: 0.7rem; display: flex; align-items: center; justify-content: center; gap: 4px;">
+            <span>📄</span> Print Passbook (PDF)
+          </button>
+        </div>
+
+        <!-- Scrollable content lists -->
+        <div id="profileTabContentArea" style="margin-top: 8px; max-height: 380px; overflow-y: auto; padding-right: 4px; display: flex; flex-direction: column; gap: 8px;">
+          <!-- Content populated dynamically -->
+        </div>
+
+        <div style="margin-top: 10px;">
+          <button class="btn btn-secondary" style="width: 100%;" onclick="app.closeModal('staffLedgerModal')">Close Profile</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- MODAL: ADD COMPANY/OWNER EXPENSE -->
+    <div class="modal-overlay" id="addCompanyExpenseModal">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h2 class="modal-title">Record Company Expense</h2>
+          <button class="modal-close" onclick="app.closeModal('addCompanyExpenseModal')">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        </div>
+        <form onsubmit="app.saveCompanyExpense(event)">
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label">Expense Date</label>
+              <input type="date" class="form-input" id="companyExpenseDateInput" required>
+            </div>
+            <div class="form-group">
+              <label class="form-label">Expense Time</label>
+              <input type="time" class="form-input" id="companyExpenseTimeInput" required>
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label">Amount (₹)</label>
+              <input type="number" class="form-input" id="companyExpenseAmountInput" placeholder="e.g. 8000" required>
+            </div>
+            <div class="form-group">
+              <label class="form-label">Expense Category</label>
+              <select class="form-input" id="companyExpenseCategorySelect" required>
+                <option value="Office Rent">Office Rent</option>
+                <option value="Salary">Salary</option>
+                <option value="Marketing">Marketing</option>
+                <option value="Fuel">Fuel</option>
+                <option value="Software">Software</option>
+                <option value="Internet">Internet</option>
+                <option value="Electricity">Electricity</option>
+                <option value="Travel">Travel</option>
+                <option value="Miscellaneous" selected>Miscellaneous</option>
+              </select>
+            </div>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Description</label>
+            <input type="text" class="form-input" id="companyExpenseDescInput" placeholder="e.g. Monthly office rent / advertisement fee" required>
+          </div>
+          <div style="margin-top: 16px;">
+            <button type="submit" class="btn" style="width: 100%;">Record Company Expense</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- MODAL: DATE ACTIVITY DETAILS -->
+    <div class="modal-overlay" id="dateDetailsModal">
+      <div class="modal-content" style="max-height: 90%;">
+        <div class="modal-header">
+          <h2 class="modal-title" id="dateDetailsTitle">Activities on Date</h2>
+          <button class="modal-close" onclick="app.closeModal('dateDetailsModal')">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        </div>
+
+        <div style="display: flex; flex-direction: column; gap: 12px; margin-top: 8px;">
+          <div>
+            <h4 style="font-size: 0.8rem; font-weight: 700; color: var(--text-muted); text-transform: uppercase;">Money Sent</h4>
+            <div id="dateDetailsSentContainer" style="display: flex; flex-direction: column; gap: 6px; margin-top: 4px;">
+              <!-- Dynamically populated -->
+            </div>
+          </div>
+          <div style="border-top: 1px solid rgba(255, 255, 255, 0.05); padding-top: 12px;">
+            <h4 style="font-size: 0.8rem; font-weight: 700; color: var(--text-muted); text-transform: uppercase;">Expenses Logged</h4>
+            <div id="dateDetailsExpensesContainer" style="display: flex; flex-direction: column; gap: 6px; margin-top: 4px;">
+              <!-- Dynamically populated -->
+            </div>
+          </div>
+        </div>
+
+        <div style="border-top: 1px solid var(--panel-border); padding-top: 12px; margin-top: 12px; display: grid; grid-template-columns: repeat(3, 1fr); text-align: center; font-size: 0.75rem;">
+          <div>
+            <div style="color: var(--text-secondary);">Total Money Sent</div>
+            <strong id="dateDetailsTotalSent" style="color: var(--accent-blue);">₹0</strong>
+          </div>
+          <div>
+            <div style="color: var(--text-secondary);">Total Money Spent</div>
+            <strong id="dateDetailsTotalSpent" style="color: var(--warning);">₹0</strong>
+          </div>
+          <div>
+            <div style="color: var(--text-secondary);">Remaining Cash</div>
+            <strong id="dateDetailsRemaining" style="color: var(--primary);">₹0</strong>
+          </div>
+        </div>
+
+        <div style="margin-top: 14px;">
+          <button class="btn btn-secondary" style="width: 100%;" onclick="app.closeModal('dateDetailsModal')">Close</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- MODAL: VIEW RECEIPT -->
+    <div class="modal-overlay" id="viewReceiptModal">
+      <div class="modal-content" style="max-height: 90%;">
+        <div class="modal-header">
+          <h2 class="modal-title" data-i18n="receiptDetails">Receipt Details</h2>
+          <button class="modal-close" onclick="app.closeModal('viewReceiptModal')">
+            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+          </button>
+        </div>
+        
+        <!-- Virtual paper receipt layout -->
+        <div class="receipt-paper" id="receiptPaperContainer">
+          <!-- Populated dynamically -->
+        </div>
+
+        <div style="margin-top: 10px; display: flex; gap: 8px;">
+          <button class="btn btn-secondary" style="flex: 1;" onclick="app.closeModal('viewReceiptModal')">Close</button>
+          <button id="receiptDeleteBtn" class="btn btn-danger" style="flex: 1; display: none;">Delete Draft</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Notification Toast Notification -->
+    <div class="toast" id="toastAlert">
+      <div id="toastIcon">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+      </div>
+      <span id="toastMessage">Success notification message!</span>
+    </div>
+
+  </div>
+
+    <!-- SCREEN: PIN LOCK LOGIN SCREEN -->
+    <div class="login-overlay active" id="loginOverlay">
+      <div class="login-content">
+        <div class="login-header-logo">
+          <!-- Mountain SVG Logo -->
+          <svg xmlns="http://www.w3.org/2000/svg" width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="m8 3 4 8 5-5 5 15H2L8 3z"/></svg>
+        </div>
+        <h2 class="login-title" data-i18n="loginTitle">TrailCash Secure Login</h2>
+        <p class="login-subtitle" id="loginSubtitle" data-i18n="loginSubtitle">Select your profile to unlock session</p>
+        
+        <!-- Screen 1: Profiles List -->
+        <div class="login-users-grid" id="loginUsersGrid">
+          <!-- Populated dynamically with active staff names and Rishabh -->
+        </div>
+
+        <!-- Screen 2: PIN Pad Entry -->
+        <div class="pin-view-container" id="pinViewContainer">
+          <div class="pin-user-header">
+            <div class="pin-avatar-large" id="pinUserInitials">D</div>
+            <h3 class="pin-user-name" id="pinUserName">Devraj</h3>
+          </div>
+          
+          <div class="pin-dots" id="pinDots">
+            <div class="pin-dot"></div>
+            <div class="pin-dot"></div>
+            <div class="pin-dot"></div>
+            <div class="pin-dot"></div>
+          </div>
+
+          <div class="pin-error-text" id="pinErrorText">Incorrect PIN! (ग़लत पिन)</div>
+
+          <div class="pin-keypad">
+            <div class="pin-key" onclick="app.pressPinKey('1')">1</div>
+            <div class="pin-key" onclick="app.pressPinKey('2')">2</div>
+            <div class="pin-key" onclick="app.pressPinKey('3')">3</div>
+            <div class="pin-key" onclick="app.pressPinKey('4')">4</div>
+            <div class="pin-key" onclick="app.pressPinKey('5')">5</div>
+            <div class="pin-key" onclick="app.pressPinKey('6')">6</div>
+            <div class="pin-key" onclick="app.pressPinKey('7')">7</div>
+            <div class="pin-key" onclick="app.pressPinKey('8')">8</div>
+            <div class="pin-key" onclick="app.pressPinKey('9')">9</div>
+            <div class="pin-key btn-action" onclick="app.cancelPinEntry()" data-i18n="cancelBtn">Cancel</div>
+            <div class="pin-key" onclick="app.pressPinKey('0')">0</div>
+            <div class="pin-key btn-action" onclick="app.pressPinBackspace()">⌫</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- DB scripts -->
+  <script src="db.js"></script>
+  <!-- Application script -->
+  <script src="app.js"></script>
+</body>
+</html>
