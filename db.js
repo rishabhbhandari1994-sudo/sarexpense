@@ -1,4 +1,4 @@
-// db.js - Supabase & IndexedDB Sync Layer for TrailCash
+// db.js - Supabase & IndexedDB Sync Layer for TrailCash (Sar Outdoors Enterprise)
 
 const DB_NAME = 'TrailCashDB';
 const DB_VERSION = 7;
@@ -6,6 +6,10 @@ const DB_VERSION = 7;
 let dbInstance = null;
 let useInMemoryFallback = false;
 let supabase = null;
+
+// Dynamic Translation Caches
+let profilesCache = [];
+let categoriesCache = [];
 
 // Default Seed Data
 const DEFAULT_STAFF = [
@@ -87,6 +91,20 @@ async function uploadBase64ToStorage(base64Data, filename) {
   }
 }
 
+// Cache translation refreshing
+async function refreshDBCaches() {
+  if (!isOnline()) return;
+  try {
+    const { data: pData } = await supabase.from('profiles').select('*').is('deleted_at', null);
+    if (pData) profilesCache = pData;
+    
+    const { data: cData } = await supabase.from('expense_categories').select('*');
+    if (cData) categoriesCache = cData;
+  } catch (e) {
+    console.warn('Failed to refresh dynamic caches:', e);
+  }
+}
+
 function getDB() {
   if (useInMemoryFallback) return Promise.resolve(null);
   if (dbInstance) return Promise.resolve(dbInstance);
@@ -154,39 +172,43 @@ function prom(request) {
   });
 }
 
-// Data Mapping Utilities
+// Data Mapping Utilities for Normalized Database
 function fromSupabaseTx(row) {
+  const staff = profilesCache.find(p => p.id === row.staff_id);
   return {
     id: row.id,
     dateTime: row.date_time,
     amount: parseFloat(row.amount),
     mode: row.mode,
     refNumber: row.ref_number || '',
-    staffName: row.staff_name,
+    staffName: staff ? staff.name : 'Unknown',
     purpose: row.purpose || '',
     company_id: row.company_id
   };
 }
 
 function toSupabaseTx(tx) {
+  const staff = profilesCache.find(p => p.name === tx.staffName);
   return {
     id: tx.id,
     date_time: tx.dateTime,
     amount: parseFloat(tx.amount),
     mode: tx.mode,
     ref_number: tx.refNumber || null,
-    staff_name: tx.staffName,
+    staff_id: staff ? staff.id : '00000000-0000-0000-0000-000000000000', // fallback
     purpose: tx.purpose || null,
-    company_id: tx.company_id || 'sar-outdoors'
+    company_id: tx.company_id || '00000000-0000-0000-0000-000000000001'
   };
 }
 
 function fromSupabaseExp(row) {
+  const staff = profilesCache.find(p => p.id === row.staff_id);
+  const cat = categoriesCache.find(c => c.id === row.category_id);
   return {
     id: row.id,
     dateTime: row.date_time,
-    staffName: row.staff_name,
-    category: row.category,
+    staffName: row.is_owner_expense ? 'Company' : (staff ? staff.name : 'Unknown'),
+    category: cat ? cat.name : 'Other',
     customCategory: row.custom_category || '',
     amount: parseFloat(row.amount),
     paymentMethod: row.payment_method,
@@ -199,8 +221,9 @@ function fromSupabaseExp(row) {
   };
 }
 
-// GPS fallback mapper helper
 function toSupabaseExp(exp) {
+  const staff = profilesCache.find(p => p.name === exp.staffName);
+  const cat = categoriesCache.find(c => c.name === exp.category) || categoriesCache.find(c => c.name === 'Other');
   let latLng = null;
   if (exp.gpsLocation && typeof exp.gpsLocation === 'object') {
     latLng = { latitude: exp.gpsLocation.latitude, longitude: exp.gpsLocation.longitude };
@@ -208,8 +231,8 @@ function toSupabaseExp(exp) {
   return {
     id: exp.id,
     date_time: exp.dateTime,
-    staff_name: exp.staffName,
-    category: exp.category,
+    staff_id: exp.isOwnerExpense ? null : (staff ? staff.id : null),
+    category_id: cat ? cat.id : '00000000-0000-0000-0000-000000000014', // default "Other" ID
     custom_category: exp.customCategory || null,
     amount: parseFloat(exp.amount),
     payment_method: exp.paymentMethod,
@@ -218,11 +241,13 @@ function toSupabaseExp(exp) {
     receipt_photo_url: exp.receiptPhoto || null,
     gps_location: latLng,
     is_owner_expense: !!exp.isOwnerExpense,
-    company_id: exp.company_id || 'sar-outdoors'
+    company_id: exp.company_id || '00000000-0000-0000-0000-000000000001'
   };
 }
 
 function fromSupabaseInc(row) {
+  const creator = profilesCache.find(p => p.id === row.created_by_id);
+  const reviewer = profilesCache.find(p => p.id === row.reviewed_by_id);
   return {
     id: row.id,
     dateTime: row.date_time,
@@ -235,9 +260,9 @@ function fromSupabaseInc(row) {
     remarks: row.remarks || '',
     proofPhoto: row.proof_photo_url || '',
     status: row.status,
-    createdBy: row.created_by,
+    createdBy: creator ? creator.name : 'Unknown',
     createdAt: row.created_at,
-    reviewedBy: row.reviewed_by || '',
+    reviewedBy: reviewer ? reviewer.name : '',
     reviewedAt: row.reviewed_at || '',
     comment: row.comment || '',
     company_id: row.company_id
@@ -245,6 +270,8 @@ function fromSupabaseInc(row) {
 }
 
 function toSupabaseInc(inc) {
+  const creator = profilesCache.find(p => p.name === inc.createdBy);
+  const reviewer = profilesCache.find(p => p.name === inc.reviewedBy);
   return {
     id: inc.id,
     date_time: inc.dateTime,
@@ -257,12 +284,12 @@ function toSupabaseInc(inc) {
     remarks: inc.remarks || null,
     proof_photo_url: inc.proofPhoto || null,
     status: inc.status || 'Pending Approval',
-    created_by: inc.createdBy,
+    created_by_id: creator ? creator.id : '00000000-0000-0000-0000-000000000000',
     created_at: inc.createdAt || new Date().toISOString(),
-    reviewed_by: inc.reviewedBy || null,
+    reviewed_by_id: reviewer ? reviewer.id : null,
     reviewed_at: inc.reviewedAt || null,
     comment: inc.comment || null,
-    company_id: inc.company_id || 'sar-outdoors'
+    company_id: inc.company_id || '00000000-0000-0000-0000-000000000001'
   };
 }
 
@@ -274,10 +301,10 @@ const db = {
         const { data, error } = await supabase
           .from('money_transfers')
           .select('*')
+          .is('deleted_at', null)
           .order('date_time', { ascending: true });
         if (!error && data) {
           const mapped = data.map(fromSupabaseTx);
-          // Update cache
           await this.overwriteLocalStore('cash_transactions', mapped);
           return mapped;
         }
@@ -320,6 +347,7 @@ const db = {
         const { data, error } = await supabase
           .from('expenses')
           .select('*')
+          .is('deleted_at', null)
           .order('date_time', { ascending: true });
         if (!error && data) {
           const mapped = data.map(fromSupabaseExp);
@@ -333,6 +361,7 @@ const db = {
     if (useInMemoryFallback) return inMemoryData.expenses;
     return runTx('expenses', 'readonly', (store) => prom(store.getAll())).catch(() => inMemoryData.expenses);
   },
+
   async addExpense(expense) {
     expense.pendingSync = !isOnline();
     if (useInMemoryFallback) {
@@ -379,7 +408,8 @@ const db = {
 
     if (isOnline()) {
       try {
-        await supabase.from('expenses').delete().eq('id', id);
+        // Implement soft delete to preserve historical audit logs in production
+        await supabase.from('expenses').update({ deleted_at: new Date().toISOString() }).eq('id', id);
       } catch (err) {
         console.error('Supabase expense deletion error:', err);
       }
@@ -394,10 +424,24 @@ const db = {
         const { data, error } = await supabase
           .from('profiles')
           .select('*')
+          .is('deleted_at', null)
           .order('name', { ascending: true });
         if (!error && data) {
-          await this.overwriteLocalStore('staff', data);
-          return data;
+          profilesCache = data;
+          // Keep raw plain PINs locally in IndexedDB context to support offline login matching
+          const currentLocal = useInMemoryFallback ? inMemoryData.staff : await runTx('staff', 'readonly', (store) => prom(store.getAll()));
+          const merged = data.map(dbProf => {
+            const matchLocal = currentLocal.find(l => l.name === dbProf.name);
+            return {
+              id: dbProf.id,
+              name: dbProf.name,
+              role: dbProf.role,
+              pin: matchLocal ? matchLocal.pin : dbProf.pin, // Keep plain local PIN cache
+              status: dbProf.status
+            };
+          });
+          await this.overwriteLocalStore('staff', merged);
+          return merged;
         }
       } catch (err) {
         console.warn('Fetch staff failed. Using cache.', err);
@@ -416,7 +460,7 @@ const db = {
 
     if (isOnline()) {
       try {
-        // Build password using PIN
+        // Build credentials format
         const email = `${staffMember.name.toLowerCase()}@saroutdoors.com`;
         const password = `saroutdoors-pin${staffMember.pin}`;
         
@@ -427,13 +471,15 @@ const db = {
           id: userId,
           name: staffMember.name,
           role: staffMember.role,
-          pin: staffMember.pin,
-          company_id: 'sar-outdoors',
+          pin: staffMember.pin, // DB trigger automatically crypts this plain string into bcrypt hash
+          company_id: '00000000-0000-0000-0000-000000000001',
           status: staffMember.status || 'Active'
         };
 
         const { error: dbErr } = await supabase.from('profiles').upsert(profile);
         if (dbErr) console.error('Error writing profile to Supabase:', dbErr);
+        
+        await refreshDBCaches();
       } catch (err) {
         console.error('Supabase staff registry error:', err);
       }
@@ -454,7 +500,7 @@ const db = {
 
     if (isOnline()) {
       try {
-        await supabase.from('profiles').delete().eq('id', id);
+        await supabase.from('profiles').update({ deleted_at: new Date().toISOString() }).eq('id', id);
       } catch (err) {
         console.error('Supabase staff delete error:', err);
       }
@@ -471,15 +517,17 @@ const db = {
           .select('*')
           .order('created_at', { ascending: false });
         if (!error && data) {
-          const mapped = data.map(fromSupabaseInc); // reusing mapper for date properties if needed or similar
-          const simplified = data.map(n => ({
-            id: n.id,
-            title: n.title,
-            content: n.content,
-            createdBy: n.created_by,
-            createdAt: n.created_at,
-            company_id: n.company_id
-          }));
+          const simplified = data.map(n => {
+            const author = profilesCache.find(p => p.id === n.created_by_id);
+            return {
+              id: n.id,
+              title: n.title,
+              content: n.content,
+              createdBy: author ? author.name : 'Unknown',
+              createdAt: n.created_at,
+              company_id: n.company_id
+            };
+          });
           await this.overwriteLocalStore('notes', simplified);
           return simplified;
         }
@@ -500,13 +548,14 @@ const db = {
 
     if (isOnline()) {
       try {
+        const author = profilesCache.find(p => p.name === note.createdBy);
         const dbNote = {
           id: note.id,
           title: note.title,
           content: note.content,
-          created_by: note.createdBy,
+          created_by_id: author ? author.id : '00000000-0000-0000-0000-000000000000',
           created_at: note.createdAt || new Date().toISOString(),
-          company_id: 'sar-outdoors'
+          company_id: '00000000-0000-0000-0000-000000000001'
         };
         await supabase.from('notes').upsert(dbNote);
       } catch (err) {
@@ -540,6 +589,7 @@ const db = {
         const { data, error } = await supabase
           .from('incoming_money')
           .select('*')
+          .is('deleted_at', null)
           .order('date_time', { ascending: true });
         if (!error && data) {
           const mapped = data.map(fromSupabaseInc);
@@ -553,6 +603,7 @@ const db = {
     if (useInMemoryFallback) return inMemoryData.incoming_money || [];
     return runTx('incoming_money', 'readonly', (store) => prom(store.getAll())).catch(() => inMemoryData.incoming_money || []);
   },
+
   async addIncomingMoney(record) {
     record.pendingSync = !isOnline();
     if (useInMemoryFallback) {
@@ -600,7 +651,8 @@ const db = {
 
     if (isOnline()) {
       try {
-        await supabase.from('incoming_money').delete().eq('id', id);
+        // Use soft delete
+        await supabase.from('incoming_money').update({ deleted_at: new Date().toISOString() }).eq('id', id);
       } catch (err) {
         console.error('Supabase incoming money delete error:', err);
       }
@@ -655,14 +707,13 @@ const db = {
   async overwriteAllLocalData(staffList, txList, expList, incomingList = []) {
     if (isOnline()) {
       try {
-        // Upload bulk to Supabase
         for (const s of staffList) {
           const profile = {
             id: s.id,
             name: s.name,
             role: s.role,
             pin: s.pin,
-            company_id: 'sar-outdoors',
+            company_id: '00000000-0000-0000-0000-000000000001',
             status: s.status || 'Active'
           };
           await supabase.from('profiles').upsert(profile);
@@ -708,9 +759,12 @@ const db = {
     }
   },
 
+  // Background Auto-sync loop for offline creations
   async syncOfflineQueue() {
     if (!isOnline()) return;
     try {
+      await refreshDBCaches();
+
       // 1. Sync Cash Transfers
       const localTxs = useInMemoryFallback ? inMemoryData.cash_transactions : await runTx('cash_transactions', 'readonly', (store) => prom(store.getAll()));
       const pendingTxs = localTxs.filter(t => t.pendingSync);
@@ -768,6 +822,7 @@ const db = {
   async initAndSeed() {
     await getDB();
     await initSupabase();
+    await refreshDBCaches();
 
     // Setup network status listeners to trigger syncs
     window.addEventListener('online', () => {

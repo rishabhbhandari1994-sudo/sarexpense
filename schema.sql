@@ -1,87 +1,131 @@
 -- ====================================================================
--- TRAIL CASH DATABASE SCHEMA (SUPABASE POSTGRESQL)
+-- TRAIL CASH ENTERPRISE DATABASE SCHEMA (SUPABASE POSTGRESQL)
 -- ====================================================================
 
--- 1. Profiles Table (extending auth.users)
+-- Enable cryptographic extensions
+create extension if not exists pgcrypto;
+
+-- 1. Companies Table (Multi-tenant support)
+create table if not exists public.companies (
+    id uuid primary key default gen_random_uuid(),
+    name text not null unique,
+    status text not null default 'Active' check (status in ('Active', 'Suspended')),
+    created_at timestamp with time zone default timezone('utc'::text, now()) not null,
+    updated_at timestamp with time zone default timezone('utc'::text, now()) not null
+);
+
+-- Enable RLS on Companies
+alter table public.companies enable row level security;
+
+create policy "Allow read access to authenticated company tenant"
+    on public.companies for select to authenticated using (true);
+
+-- 2. Expense Categories Table (Normalized Lookup)
+create table if not exists public.expense_categories (
+    id uuid primary key default gen_random_uuid(),
+    company_id uuid not null references public.companies(id) on delete cascade,
+    name text not null,
+    emoji text not null default '📦',
+    is_company_overhead boolean not null default false,
+    created_at timestamp with time zone default timezone('utc'::text, now()) not null,
+    updated_at timestamp with time zone default timezone('utc'::text, now()) not null,
+    constraint unique_company_category_name unique (company_id, name)
+);
+
+-- Enable RLS on Categories
+alter table public.expense_categories enable row level security;
+
+create policy "Allow read access to expense categories"
+    on public.expense_categories for select to authenticated using (true);
+
+-- 3. Profiles Table (extending auth.users)
 create table if not exists public.profiles (
     id uuid primary key references auth.users(id) on delete cascade,
+    company_id uuid not null references public.companies(id) on delete cascade,
     name text not null unique,
     role text not null check (role in ('Owner', 'Staff')),
-    pin text not null,
-    company_id text not null default 'sar-outdoors',
+    pin text not null, -- Stores crypt/bcrypt hash via database trigger
     status text not null default 'Active' check (status in ('Active', 'Suspended')),
-    created_at timestamp with time zone default timezone('utc'::text, now()) not null
+    created_at timestamp with time zone default timezone('utc'::text, now()) not null,
+    updated_at timestamp with time zone default timezone('utc'::text, now()) not null,
+    deleted_at timestamp with time zone
 );
 
 -- Enable RLS on Profiles
 alter table public.profiles enable row level security;
 
+-- 4. RLS Security Definer Optimization Helpers
+CREATE OR REPLACE FUNCTION public.is_company_owner(u_id UUID)
+RETURNS BOOLEAN AS $$
+    SELECT EXISTS (
+        SELECT 1 FROM public.profiles
+        WHERE id = u_id AND role = 'Owner' AND status = 'Active' AND deleted_at IS NULL
+    );
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
 -- Profiles Policies
 create policy "Allow read access to authenticated profiles"
-    on public.profiles for select
-    to authenticated
-    using (true);
+    on public.profiles for select to authenticated using (deleted_at is null);
 
-create policy "Allow updates to own profile"
-    on public.profiles for update
-    to authenticated
-    using (auth.uid() = id);
+create policy "Allow updates to self profile or owner update"
+    on public.profiles for update to authenticated
+    using (auth.uid() = id or public.is_company_owner(auth.uid()));
 
 create policy "Allow insert access to owner"
-    on public.profiles for insert
-    to authenticated
-    with check (
-        exists (
-            select 1 from public.profiles
-            where id = auth.uid() and role = 'Owner'
-        )
-    );
+    on public.profiles for insert to authenticated
+    with check (public.is_company_owner(auth.uid()));
 
 create policy "Allow delete access to owner"
-    on public.profiles for delete
-    to authenticated
-    using (
-        exists (
-            select 1 from public.profiles
-            where id = auth.uid() and role = 'Owner'
-        )
-    );
+    on public.profiles for delete to authenticated
+    using (public.is_company_owner(auth.uid()));
 
--- 2. Money Transfers Table (Owner sending money to staff)
+-- Profile PIN Auto-Hashing Trigger
+CREATE OR REPLACE FUNCTION public.trg_hash_profile_pin()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF TG_OP = 'INSERT' OR (TG_OP = 'UPDATE' AND NEW.pin <> OLD.pin) THEN
+        IF length(NEW.pin) < 50 THEN -- Trigger crypt only if not already hashed
+            NEW.pin := crypt(NEW.pin, gen_salt('bf'));
+        END IF;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+create trigger hash_profile_pin_trigger
+    before insert or update on public.profiles
+    for each row execute function public.trg_hash_profile_pin();
+
+-- 5. Money Transfers Table (Owner sending money to staff)
 create table if not exists public.money_transfers (
     id uuid primary key default gen_random_uuid(),
+    company_id uuid not null references public.companies(id) on delete cascade,
     date_time timestamp with time zone not null,
     amount numeric not null check (amount > 0),
     mode text not null check (mode in ('Cash', 'UPI', 'Bank')),
     ref_number text,
-    staff_name text not null references public.profiles(name) on delete cascade,
+    staff_id uuid not null references public.profiles(id) on delete cascade,
     purpose text,
-    company_id text not null default 'sar-outdoors',
-    created_at timestamp with time zone default timezone('utc'::text, now()) not null
+    created_at timestamp with time zone default timezone('utc'::text, now()) not null,
+    updated_at timestamp with time zone default timezone('utc'::text, now()) not null,
+    deleted_at timestamp with time zone
 );
 
 -- Enable RLS on Money Transfers
 alter table public.money_transfers enable row level security;
 
 -- Money Transfers Policies
-create policy "Allow read access to authenticated transfers"
-    on public.money_transfers for select
-    to authenticated
-    using (true);
+create policy "Allow read access to transfers"
+    on public.money_transfers for select to authenticated using (deleted_at is null);
 
-create policy "Allow write access to owners only"
-    on public.money_transfers for all
-    to authenticated
-    using (
-        exists (
-            select 1 from public.profiles
-            where id = auth.uid() and role = 'Owner'
-        )
-    );
+create policy "Allow full write access to owner"
+    on public.money_transfers for all to authenticated
+    using (public.is_company_owner(auth.uid()));
 
--- 3. Incoming Money Table (Staff receiving money from clients/vendors)
+-- 6. Incoming Money Table (Staff receiving money from clients/vendors)
 create table if not exists public.incoming_money (
     id uuid primary key default gen_random_uuid(),
+    company_id uuid not null references public.companies(id) on delete cascade,
     date_time timestamp with time zone not null,
     amount numeric not null check (amount > 0),
     received_from text not null check (received_from in ('Customer', 'Guide', 'Vendor', 'Other')),
@@ -92,49 +136,41 @@ create table if not exists public.incoming_money (
     remarks text,
     proof_photo_url text,
     status text not null default 'Pending Approval' check (status in ('Pending Approval', 'Approved', 'Rejected')),
-    created_by text not null references public.profiles(name) on delete cascade,
+    created_by_id uuid not null references public.profiles(id) on delete cascade,
     created_at timestamp with time zone default timezone('utc'::text, now()) not null,
-    reviewed_by text references public.profiles(name) on delete set null,
+    updated_at timestamp with time zone default timezone('utc'::text, now()) not null,
+    reviewed_by_id uuid references public.profiles(id) on delete set null,
     reviewed_at timestamp with time zone,
     comment text,
-    company_id text not null default 'sar-outdoors'
+    deleted_at timestamp with time zone
 );
 
 -- Enable RLS on Incoming Money
 alter table public.incoming_money enable row level security;
 
 -- Incoming Money Policies
-create policy "Allow read access to authenticated incoming"
-    on public.incoming_money for select
-    to authenticated
-    using (true);
+create policy "Allow read access to incoming"
+    on public.incoming_money for select to authenticated using (deleted_at is null);
 
-create policy "Allow staff to insert their own incoming records"
-    on public.incoming_money for insert
-    to authenticated
-    with check (
-        exists (
-            select 1 from public.profiles
-            where id = auth.uid() and name = created_by
-        )
-    );
+create policy "Allow staff to insert their own incoming"
+    on public.incoming_money for insert to authenticated
+    with check (auth.uid() = created_by_id);
 
-create policy "Allow owner full write access to incoming records"
-    on public.incoming_money for all
-    to authenticated
-    using (
-        exists (
-            select 1 from public.profiles
-            where id = auth.uid() and role = 'Owner'
-        )
-    );
+create policy "Allow staff to update their own pending incoming"
+    on public.incoming_money for update to authenticated
+    using (auth.uid() = created_by_id and status = 'Pending Approval');
 
--- 4. Expenses Table
+create policy "Allow owner full access to incoming reviews"
+    on public.incoming_money for all to authenticated
+    using (public.is_company_owner(auth.uid()));
+
+-- 7. Expenses Table
 create table if not exists public.expenses (
     id uuid primary key default gen_random_uuid(),
+    company_id uuid not null references public.companies(id) on delete cascade,
     date_time timestamp with time zone not null,
-    staff_name text not null, -- Can be a staff name or 'Company' for owner expenses
-    category text not null,
+    staff_id uuid references public.profiles(id) on delete cascade, -- null for direct company overhead
+    category_id uuid not null references public.expense_categories(id) on delete restrict,
     custom_category text,
     amount numeric not null check (amount > 0),
     payment_method text not null check (payment_method in ('Cash', 'UPI', 'Bank')),
@@ -143,94 +179,283 @@ create table if not exists public.expenses (
     receipt_photo_url text,
     gps_location jsonb,
     is_owner_expense boolean not null default false,
-    company_id text not null default 'sar-outdoors',
-    created_at timestamp with time zone default timezone('utc'::text, now()) not null
+    created_at timestamp with time zone default timezone('utc'::text, now()) not null,
+    updated_at timestamp with time zone default timezone('utc'::text, now()) not null,
+    deleted_at timestamp with time zone
 );
 
 -- Enable RLS on Expenses
 alter table public.expenses enable row level security;
 
 -- Expenses Policies
-create policy "Allow read access to authenticated expenses"
-    on public.expenses for select
-    to authenticated
-    using (true);
+create policy "Allow read access to expenses"
+    on public.expenses for select to authenticated using (deleted_at is null);
 
 create policy "Allow staff to insert their own expenses"
-    on public.expenses for insert
-    to authenticated
-    with check (
-        exists (
-            select 1 from public.profiles
-            where id = auth.uid() and name = staff_name
-        )
-    );
+    on public.expenses for insert to authenticated
+    with check (auth.uid() = staff_id);
 
-create policy "Allow owner full access to expenses"
-    on public.expenses for all
-    to authenticated
-    using (
-        exists (
-            select 1 from public.profiles
-            where id = auth.uid() and role = 'Owner'
-        )
-    );
+create policy "Allow owner full write access to expenses"
+    on public.expenses for all to authenticated
+    using (public.is_company_owner(auth.uid()));
 
--- 5. Notes Table (Bulletin board updates)
+-- 8. Staff Balances Summary Table (Normalized Cache)
+create table if not exists public.staff_balances (
+    profile_id uuid primary key references public.profiles(id) on delete cascade,
+    company_id uuid not null references public.companies(id) on delete cascade,
+    total_received numeric not null default 0,
+    total_spent numeric not null default 0,
+    current_balance numeric not null default 0,
+    last_updated_at timestamp with time zone default timezone('utc'::text, now()) not null
+);
+
+-- Enable RLS on Staff Balances
+alter table public.staff_balances enable row level security;
+
+create policy "Allow read access to staff balances"
+    on public.staff_balances for select to authenticated using (true);
+
+-- Trigger functions for auto-recalculation of staff balances
+CREATE OR REPLACE FUNCTION public.recalculate_staff_balance(p_id UUID)
+RETURNS VOID AS $$
+DECLARE
+    v_received NUMERIC := 0;
+    v_spent NUMERIC := 0;
+    v_company_id UUID;
+BEGIN
+    SELECT company_id INTO v_company_id FROM public.profiles WHERE id = p_id;
+    
+    -- Sum transfers from owner
+    SELECT COALESCE(SUM(amount), 0) INTO v_received 
+    FROM public.money_transfers 
+    WHERE staff_id = p_id AND deleted_at IS NULL;
+    
+    -- Sum approved incoming money
+    v_received := v_received + COALESCE((
+        SELECT SUM(amount) 
+        FROM public.incoming_money 
+        WHERE created_by_id = p_id AND status = 'Approved' AND deleted_at IS NULL
+    ), 0);
+    
+    -- Sum expenses
+    SELECT COALESCE(SUM(amount), 0) INTO v_spent 
+    FROM public.expenses 
+    WHERE staff_id = p_id AND is_owner_expense = FALSE AND deleted_at IS NULL;
+    
+    -- Upsert cache
+    INSERT INTO public.staff_balances (profile_id, company_id, total_received, total_spent, current_balance, last_updated_at)
+    VALUES (p_id, v_company_id, v_received, v_spent, (v_received - v_spent), now())
+    ON CONFLICT (profile_id) DO UPDATE 
+    SET total_received = v_received,
+        total_spent = v_spent,
+        current_balance = (v_received - v_spent),
+        last_updated_at = now();
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- Trigger triggers on Money Transfers
+CREATE OR REPLACE FUNCTION public.trg_on_transfer_change()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        PERFORM public.recalculate_staff_balance(OLD.staff_id);
+        RETURN OLD;
+    ELSIF TG_OP = 'UPDATE' THEN
+        PERFORM public.recalculate_staff_balance(NEW.staff_id);
+        IF OLD.staff_id <> NEW.staff_id THEN
+            PERFORM public.recalculate_staff_balance(OLD.staff_id);
+        END IF;
+        RETURN NEW;
+    ELSE
+        PERFORM public.recalculate_staff_balance(NEW.staff_id);
+        RETURN NEW;
+    END IF;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+create trigger trg_on_transfer_change_trigger
+    after insert or update or delete on public.money_transfers
+    for each row execute function public.trg_on_transfer_change();
+
+-- Trigger triggers on Incoming Money
+CREATE OR REPLACE FUNCTION public.trg_on_incoming_change()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        PERFORM public.recalculate_staff_balance(OLD.created_by_id);
+        RETURN OLD;
+    ELSIF TG_OP = 'UPDATE' THEN
+        PERFORM public.recalculate_staff_balance(NEW.created_by_id);
+        IF OLD.created_by_id <> NEW.created_by_id THEN
+            PERFORM public.recalculate_staff_balance(OLD.created_by_id);
+        END IF;
+        RETURN NEW;
+    ELSE
+        PERFORM public.recalculate_staff_balance(NEW.created_by_id);
+        RETURN NEW;
+    END IF;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+create trigger trg_on_incoming_change_trigger
+    after insert or update or delete on public.incoming_money
+    for each row execute function public.trg_on_incoming_change();
+
+-- Trigger triggers on Expenses
+CREATE OR REPLACE FUNCTION public.trg_on_expense_change()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF TG_OP = 'DELETE' THEN
+        IF OLD.staff_id IS NOT NULL THEN
+            PERFORM public.recalculate_staff_balance(OLD.staff_id);
+        END IF;
+        RETURN OLD;
+    ELSIF TG_OP = 'UPDATE' THEN
+        IF NEW.staff_id IS NOT NULL THEN
+            PERFORM public.recalculate_staff_balance(NEW.staff_id);
+        END IF;
+        IF OLD.staff_id IS NOT NULL AND OLD.staff_id <> NEW.staff_id THEN
+            PERFORM public.recalculate_staff_balance(OLD.staff_id);
+        END IF;
+        RETURN NEW;
+    ELSE
+        IF NEW.staff_id IS NOT NULL THEN
+            PERFORM public.recalculate_staff_balance(NEW.staff_id);
+        END IF;
+        RETURN NEW;
+    END IF;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+create trigger trg_on_expense_change_trigger
+    after insert or update or delete on public.expenses
+    for each row execute function public.trg_on_expense_change();
+
+-- 9. Notes Table (Shared bulletin posts)
 create table if not exists public.notes (
     id uuid primary key default gen_random_uuid(),
+    company_id uuid not null references public.companies(id) on delete cascade,
     title text not null,
     content text not null,
-    created_by text not null references public.profiles(name) on delete cascade,
+    created_by_id uuid not null references public.profiles(id) on delete cascade,
     created_at timestamp with time zone default timezone('utc'::text, now()) not null,
-    company_id text not null default 'sar-outdoors'
+    updated_at timestamp with time zone default timezone('utc'::text, now()) not null
 );
 
 -- Enable RLS on Notes
 alter table public.notes enable row level security;
 
--- Notes Policies
 create policy "Allow read access to notes"
-    on public.notes for select
-    to authenticated
-    using (true);
+    on public.notes for select to authenticated using (true);
 
-create policy "Allow owner full access to notes"
-    on public.notes for all
-    to authenticated
-    using (
-        exists (
-            select 1 from public.profiles
-            where id = auth.uid() and role = 'Owner'
-        )
-    );
+create policy "Allow owner write access to notes"
+    on public.notes for all to authenticated
+    using (public.is_company_owner(auth.uid()));
+
+-- 10. Audit Activity Logs Table
+create table if not exists public.activity_logs (
+    id uuid primary key default gen_random_uuid(),
+    company_id uuid not null references public.companies(id) on delete cascade,
+    user_id uuid references public.profiles(id) on delete set null,
+    action text not null,
+    details jsonb not null default '{}'::jsonb,
+    ip_address text,
+    created_at timestamp with time zone default timezone('utc'::text, now()) not null
+);
+
+-- Enable RLS on Activity Logs
+alter table public.activity_logs enable row level security;
+
+create policy "Allow owners to view activity logs"
+    on public.activity_logs for select to authenticated
+    using (public.is_company_owner(auth.uid()));
+
+-- 11. Push Notifications Table
+create table if not exists public.notifications (
+    id uuid primary key default gen_random_uuid(),
+    company_id uuid not null references public.companies(id) on delete cascade,
+    user_id uuid not null references public.profiles(id) on delete cascade,
+    title text not null,
+    message text not null,
+    type text not null default 'SYSTEM',
+    is_read boolean not null default false,
+    created_at timestamp with time zone default timezone('utc'::text, now()) not null
+);
+
+-- Enable RLS on Notifications
+alter table public.notifications enable row level security;
+
+create policy "Allow users to access their own notifications"
+    on public.notifications for all to authenticated
+    using (auth.uid() = user_id);
+
+-- ====================================================================
+-- SEED INITIAL LOOKUP DATA
+-- ====================================================================
+
+-- Seed Company
+insert into public.companies (id, name, status)
+values ('00000000-0000-0000-0000-000000000001', 'Sar Outdoors', 'Active')
+on conflict (id) do nothing;
+
+-- Seed Expense Categories
+insert into public.expense_categories (company_id, name, emoji, is_company_overhead)
+values 
+    ('00000000-0000-0000-0000-000000000001', 'Ration', '🌾', false),
+    ('00000000-0000-0000-0000-000000000001', 'Fuel / Diesel', '⛽', false),
+    ('00000000-0000-0000-0000-000000000001', 'Transportation', '🚌', false),
+    ('00000000-0000-0000-0000-000000000001', 'Mule', '🐴', false),
+    ('00000000-0000-0000-0000-000000000001', 'Porter', '🎒', false),
+    ('00000000-0000-0000-0000-000000000001', 'Guide', '🗺️', false),
+    ('00000000-0000-0000-0000-000000000001', 'Hotel', '🏨', false),
+    ('00000000-0000-0000-0000-000000000001', 'Homestay', '🏡', false),
+    ('00000000-0000-0000-0000-000000000001', 'Food', '🍔', false),
+    ('00000000-0000-0000-0000-000000000001', 'Medical', '💊', false),
+    ('00000000-0000-0000-0000-000000000001', 'Equipment', '🛠️', false),
+    ('00000000-0000-0000-0000-000000000001', 'Forest Permit', '🌲', false),
+    ('00000000-0000-0000-0000-000000000001', 'Entry Fee', '🎟️', false),
+    ('00000000-0000-0000-0000-000000000001', 'Miscellaneous', '📦', false),
+    ('00000000-0000-0000-0000-000000000001', 'Other', '❓', false),
+    -- Company Overhead Overhead Categories
+    ('00000000-0000-0000-0000-000000000001', 'Office Rent', '🏢', true),
+    ('00000000-0000-0000-0000-000000000001', 'Salary', '💰', true),
+    ('00000000-0000-0000-0000-000000000001', 'Marketing', '📣', true),
+    ('00000000-0000-0000-0000-000000000001', 'Fuel', '⛽', true),
+    ('00000000-0000-0000-0000-000000000001', 'Software', '💻', true),
+    ('00000000-0000-0000-0000-000000000001', 'Internet', '🌐', true),
+    ('00000000-0000-0000-0000-000000000001', 'Electricity', '⚡', true),
+    ('00000000-0000-0000-0000-000000000001', 'Travel', '✈️', true)
+on conflict (company_id, name) do nothing;
+
+-- ====================================================================
+-- PERFORMANCE INDEXES
+-- ====================================================================
+
+-- Indexing foreign keys
+create index if not exists idx_profiles_company on public.profiles(company_id);
+create index if not exists idx_money_transfers_staff on public.money_transfers(staff_id);
+create index if not exists idx_incoming_money_creator on public.incoming_money(created_by_id);
+create index if not exists idx_expenses_staff on public.expenses(staff_id);
+create index if not exists idx_expenses_category on public.expenses(category_id);
+
+-- Indexing query dates
+create index if not exists idx_money_transfers_date on public.money_transfers(date_time desc);
+create index if not exists idx_expenses_date on public.expenses(date_time desc);
+create index if not exists idx_incoming_money_date on public.incoming_money(date_time desc);
 
 -- ====================================================================
 -- STORAGE BUCKETS & POLICIES SETUP
 -- ====================================================================
-
--- Create Storage Bucket
 insert into storage.buckets (id, name, public)
 values ('trailcash-proofs', 'trailcash-proofs', true)
 on conflict (id) do nothing;
 
--- Storage Bucket Policies
 create policy "Allow public file view"
-    on storage.objects for select
-    using (bucket_id = 'trailcash-proofs');
+    on storage.objects for select using (bucket_id = 'trailcash-proofs');
 
 create policy "Allow authenticated uploads"
-    on storage.objects for insert
-    to authenticated
-    with check (bucket_id = 'trailcash-proofs');
+    on storage.objects for insert to authenticated with check (bucket_id = 'trailcash-proofs');
 
 create policy "Allow owner to delete files"
-    on storage.objects for delete
-    to authenticated
-    using (
-        bucket_id = 'trailcash-proofs' and
-        exists (
-            select 1 from public.profiles
-            where id = auth.uid() and role = 'Owner'
-        )
-    );
+    on storage.objects for delete to authenticated
+    using (bucket_id = 'trailcash-proofs' and public.is_company_owner(auth.uid()));
