@@ -245,41 +245,71 @@
 
       <!-- SCREEN: STAFF DASHBOARD -->
       <div id="staffHomeTab" class="tab-content" style="display: none;">
-        <!-- Staff Stats Summary -->
-        <div class="stats-grid">
-          <div class="stat-box">
-            <div class="stat-label" data-i18n="myCashLimit">My Cash Limit</div>
-            <div class="stat-value blue" id="staffLimitVal">₹0</div>
-          </div>
-          <div class="stat-box">
-            <div class="stat-label" data-i18n="totalSpent">Total Spent</div>
-            <div class="stat-value warning" id="staffSpentVal">₹0</div>
-          </div>
-          <div class="stat-box">
-            <div class="stat-label" data-i18n="remainingBalance">Remaining Balance</div>
-            <div class="stat-value primary" id="staffRemainingVal">₹0</div>
-          </div>
+        <!-- Staff Sub-tab Switcher -->
+        <div style="display: flex; gap: 8px; margin-bottom: 12px;">
+          <button class="role-chip active" id="staffTabMyLedgerBtn" onclick="app.switchStaffDashboardTab('ledger')">My Ledger Passbook</button>
+          <button class="role-chip" id="staffTabSharedDashBtn" onclick="app.switchStaffDashboardTab('shared')">Shared Dashboard (Public)</button>
         </div>
 
-        <!-- Unsynced Warning Banner -->
-        <div id="offlineSyncBanner" class="card" style="border-color: var(--warning); display: none; background: rgba(245, 158, 11, 0.05); margin-top: 12px;">
-          <div style="display: flex; justify-content: space-between; align-items: center;">
-            <div style="display: flex; align-items: center; gap: 8px; font-size: 0.8rem; font-weight: 600; color: var(--warning);">
-              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 1v22h22L1 1Z"/><path d="M16.72 11.06A10.94 10.94 0 0 1 19 12.5"/><path d="m5 12.5 1.5-1.5"/></svg>
-              <span id="unsyncedCountLabel">3 Unsynced Expenses Saved Locally</span>
+        <!-- VIEW 1: PERSONAL VIEW -->
+        <div id="staffPersonalViewContainer">
+          <!-- Staff Stats Summary -->
+          <div class="stats-grid">
+            <div class="stat-box">
+              <div class="stat-label" data-i18n="myCashLimit">My Cash Limit</div>
+              <div class="stat-value blue" id="staffLimitVal">₹0</div>
             </div>
-            <button class="btn" style="padding: 6px 12px; font-size: 0.75rem; background: var(--warning);" onclick="app.forceSyncSimulation()">Sync Now</button>
+            <div class="stat-box">
+              <div class="stat-label" data-i18n="totalSpent">Total Spent</div>
+              <div class="stat-value warning" id="staffSpentVal">₹0</div>
+            </div>
+            <div class="stat-box">
+              <div class="stat-label" data-i18n="remainingBalance">Remaining Balance</div>
+              <div class="stat-value primary" id="staffRemainingVal">₹0</div>
+            </div>
+          </div>
+
+          <!-- Unsynced Warning Banner -->
+          <div id="offlineSyncBanner" class="card" style="border-color: var(--warning); display: none; background: rgba(245, 158, 11, 0.05); margin-top: 12px;">
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+              <div style="display: flex; align-items: center; gap: 8px; font-size: 0.8rem; font-weight: 600; color: var(--warning);">
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 1v22h22L1 1Z"/><path d="M16.72 11.06A10.94 10.94 0 0 1 19 12.5"/><path d="m5 12.5 1.5-1.5"/></svg>
+                <span id="unsyncedCountLabel">3 Unsynced Expenses Saved Locally</span>
+              </div>
+              <button class="btn" style="padding: 6px 12px; font-size: 0.75rem; background: var(--warning);" onclick="app.forceSyncSimulation()">Sync Now</button>
+            </div>
+          </div>
+
+          <!-- Staff Running Passbook Ledger -->
+          <div class="card glow-primary" style="margin-top: 12px;">
+            <div class="section-title">
+              <span>Running Cash Passbook</span>
+            </div>
+            
+            <div id="staffPassbookContainer" style="display: flex; flex-direction: column; gap: 8px; max-height: 400px; overflow-y: auto;">
+              <!-- Dynamically populated like a bank passbook -->
+            </div>
           </div>
         </div>
 
-        <!-- Staff Running Passbook Ledger -->
-        <div class="card glow-primary" style="margin-top: 12px;">
-          <div class="section-title">
-            <span>Running Cash Passbook</span>
+        <!-- VIEW 2: SHARED PUBLIC VIEW (Track each other's expenses & data) -->
+        <div id="staffSharedViewContainer" style="display: none;">
+          <!-- Live Balances Directory -->
+          <div class="card">
+            <div class="section-title">Live Staff Cash Balances</div>
+            <div style="font-size: 0.7rem; color: var(--text-muted); margin-bottom: 8px;">Real-time available cash advance held by each trekking guide.</div>
+            <div id="staffDirectoryGrid" style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px;">
+              <!-- Populated dynamically in app.js -->
+            </div>
           </div>
-          
-          <div id="staffPassbookContainer" style="display: flex; flex-direction: column; gap: 8px; max-height: 400px; overflow-y: auto;">
-            <!-- Dynamically populated like a bank passbook -->
+
+          <!-- Chronological Expenses Feed of Everyone -->
+          <div class="card glow-primary" style="margin-top: 12px;">
+            <div class="section-title">Company Expenses Feed</div>
+            <div style="font-size: 0.7rem; color: var(--text-muted); margin-bottom: 8px;">Chronological feed of all field expenses logged by all coordinators.</div>
+            <div id="staffSharedExpensesFeed" style="display: flex; flex-direction: column; gap: 8px; max-height: 400px; overflow-y: auto;">
+              <!-- Populated dynamically in app.js -->
+            </div>
           </div>
         </div>
 

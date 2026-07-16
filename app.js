@@ -36,6 +36,7 @@ const app = {
   currentLanguage: 'en', // 'en' or 'hi'
   activeOwnerTab: 'home', // 'home', 'balances', 'reports', 'staff', 'settings'
   activeProfileModalTab: 'passbook', // 'passbook', 'received', 'expenses'
+  activeStaffTab: 'ledger', // 'ledger' or 'shared'
   activeStaffProfileName: null,
   isOnline: true,
 
@@ -300,6 +301,7 @@ const app = {
         
         // Reset navigation
         this.activeOwnerTab = 'home';
+        this.activeStaffTab = 'ledger';
         this.clearOwnerFilters();
 
         this.loginSelectedUser = null;
@@ -763,9 +765,37 @@ const app = {
     }, 250);
   },
 
-  /* ==================== STAFF DASHBOARD (PERSONAL VIEW) ==================== */
+  /* ==================== STAFF DASHBOARD (PERSONAL VIEW & SHARED DASHBOARD) ==================== */
+  switchStaffDashboardTab(tabName) {
+    this.activeStaffTab = tabName;
+    this.renderStaffDashboard();
+  },
+
   renderStaffDashboard() {
     const staffName = this.currentUser;
+
+    const personalContainer = document.getElementById('staffPersonalViewContainer');
+    const sharedContainer = document.getElementById('staffSharedViewContainer');
+
+    if (this.activeStaffTab === 'shared') {
+      personalContainer.style.display = 'none';
+      sharedContainer.style.display = 'block';
+
+      document.getElementById('staffTabMyLedgerBtn').className = 'role-chip';
+      document.getElementById('staffTabSharedDashBtn').className = 'role-chip active';
+
+      this.renderStaffSharedDirectory();
+      this.renderStaffSharedExpensesFeed();
+      return;
+    }
+
+    // Otherwise render standard Personal Ledger
+    personalContainer.style.display = 'block';
+    sharedContainer.style.display = 'none';
+
+    document.getElementById('staffTabMyLedgerBtn').className = 'role-chip active';
+    document.getElementById('staffTabSharedDashBtn').className = 'role-chip';
+
     const stats = this.getStaffBalances(staffName);
 
     // Bind stats
@@ -862,6 +892,83 @@ const app = {
       </div>
     `;
     container.appendChild(openRow);
+  },
+
+  renderStaffSharedDirectory() {
+    const container = document.getElementById('staffDirectoryGrid');
+    if (!container) return;
+    container.innerHTML = '';
+
+    const staffMembers = this.STAFF_LIST;
+
+    if (staffMembers.length === 0) {
+      container.innerHTML = `<div style="text-align: center; color: var(--text-muted); font-size: 0.75rem; grid-column: span 2;">No active staff.</div>`;
+      return;
+    }
+
+    staffMembers.forEach(s => {
+      const stats = this.getStaffBalances(s.name);
+      const card = document.createElement('div');
+      card.style.cssText = 'background: rgba(255,255,255,0.02); border: 1px solid var(--panel-border); border-radius: 12px; padding: 10px; text-align: center; display: flex; flex-direction: column; gap: 4px;';
+      
+      const initials = s.name.substring(0, 2).toUpperCase();
+
+      card.innerHTML = `
+        <div style="width: 32px; height: 32px; border-radius: 50%; background: var(--primary-glow); color: var(--primary); display: flex; align-items: center; justify-content: center; font-size: 0.75rem; font-weight: bold; margin: 0 auto;">${initials}</div>
+        <div style="font-weight: 700; font-size: 0.8rem; color: var(--text-primary);">${s.name}</div>
+        <div style="font-size: 0.6rem; color: var(--text-muted); text-transform: uppercase;">Available Cash</div>
+        <div style="font-family: var(--font-display); font-weight: 700; font-size: 0.9rem; color: var(--primary);">₹${stats.balance.toLocaleString('en-IN')}</div>
+      `;
+      container.appendChild(card);
+    });
+  },
+
+  renderStaffSharedExpensesFeed() {
+    const container = document.getElementById('staffSharedExpensesFeed');
+    if (!container) return;
+    container.innerHTML = '';
+
+    const publicExpenses = this.data.expenses
+      .filter(e => !e.isOwnerExpense)
+      .sort((a, b) => new Date(b.dateTime) - new Date(a.dateTime));
+
+    if (publicExpenses.length === 0) {
+      container.innerHTML = `<div style="text-align: center; color: var(--text-muted); font-size: 0.75rem; padding: 24px;">No field expenses logged yet.</div>`;
+      return;
+    }
+
+    publicExpenses.forEach(exp => {
+      const label = exp.customCategory ? `${exp.category} (${exp.customCategory})` : exp.category;
+      const catObj = CATEGORIES.find(c => c.name === exp.category);
+      const emoji = catObj ? catObj.emoji : '📦';
+      const dt = new Date(exp.dateTime);
+      const dateStr = dt.toLocaleDateString('en-IN', { day: 'numeric', month: 'short' });
+      const timeStr = dt.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: false });
+
+      const row = document.createElement('div');
+      row.style.cssText = 'background: rgba(255,255,255,0.02); border: 1px solid var(--panel-border); border-radius: 12px; padding: 10px; display: flex; flex-direction: column; gap: 4px;';
+      
+      row.innerHTML = `
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+          <strong style="font-size: 0.8rem; color: var(--text-primary);">${exp.staffName} ➔ ${emoji} ${label}</strong>
+          <strong style="font-size: 0.85rem; color: var(--warning);">₹${exp.amount.toLocaleString('en-IN')}</strong>
+        </div>
+        <div style="font-size: 0.65rem; color: var(--text-muted);">
+          ${dateStr} ${timeStr} • Vendor: ${exp.vendorName || '-'} • ${exp.paymentMethod || 'Cash'}
+        </div>
+        <div style="font-size: 0.75rem; color: var(--text-secondary); font-style: italic; border-left: 2px solid var(--primary); padding-left: 6px; margin-top: 2px;">
+          "${exp.description}"
+        </div>
+        ${exp.receiptPhoto ? `
+          <div style="margin-top: 4px; text-align: right;">
+            <span style="font-size: 0.65rem; color: var(--primary); cursor: pointer; text-decoration: underline;" onclick="app.viewReceipt('${exp.id}')">
+              View Bill Attachment 📄
+            </span>
+          </div>
+        ` : ''}
+      `;
+      container.appendChild(row);
+    });
   },
 
   /* ==================== FEATURE 6: SEARCH & FILTERS ==================== */
