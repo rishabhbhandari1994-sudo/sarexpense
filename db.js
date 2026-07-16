@@ -470,6 +470,8 @@ const db = {
         const profile = {
           id: userId,
           name: staffMember.name,
+          email: email,
+          phone: staffMember.phone || `+91-${staffMember.name.toLowerCase()}-${Date.now()}`,
           role: staffMember.role,
           pin: staffMember.pin, // DB trigger automatically crypts this plain string into bcrypt hash
           company_id: '00000000-0000-0000-0000-000000000001',

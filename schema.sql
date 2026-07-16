@@ -20,11 +20,14 @@ alter table public.companies enable row level security;
 create policy "Allow read access to authenticated company tenant"
     on public.companies for select to authenticated using (true);
 
--- 2. Company Settings Table (Branding, timezone, currency, details)
+-- 2. Company Settings Table (GSTIN, Address, Branding, Timezone, Currency)
 create table if not exists public.company_settings (
     company_id uuid primary key references public.companies(id) on delete cascade,
     logo_url text,
-    company_details jsonb not null default '{}'::jsonb,
+    gstin text,
+    address text,
+    phone text,
+    email text,
     timezone text not null default 'Asia/Kolkata',
     currency text not null default 'INR',
     branding_colors jsonb not null default '{}'::jsonb,
@@ -68,10 +71,10 @@ create table if not exists public.profiles (
     id uuid primary key references auth.users(id) on delete cascade,
     company_id uuid not null references public.companies(id) on delete cascade,
     name text not null, -- Removed UNIQUE constraint from name
-    email text not null unique, -- Using email/phone as the unique identifier
-    phone text,
-    role text not null check (role in ('Owner', 'Manager', 'Staff')), -- Added Manager role
-    pin text not null, -- Hashed Pin code via database triggers
+    email text not null unique,
+    phone text not null unique, -- Added unique phone field for user identity verification
+    role text not null check (role in ('Owner', 'Manager', 'Staff')),
+    pin text not null, -- Hashed PIN code via database triggers
     status text not null default 'Active' check (status in ('Active', 'Suspended')),
     created_at timestamp with time zone default timezone('utc'::text, now()) not null,
     updated_at timestamp with time zone default timezone('utc'::text, now()) not null,
@@ -82,20 +85,20 @@ create table if not exists public.profiles (
 -- Enable RLS on Profiles
 alter table public.profiles enable row level security;
 
--- 5. RLS Security Definer Optimization Helpers
-CREATE OR REPLACE FUNCTION public.is_company_owner(u_id UUID)
+-- 5. RLS Security Definer Optimization Helpers (Multi-Tenant Company validation)
+CREATE OR REPLACE FUNCTION public.is_company_owner(u_id UUID, c_id UUID)
 RETURNS BOOLEAN AS $$
     SELECT EXISTS (
         SELECT 1 FROM public.profiles
-        WHERE id = u_id AND role = 'Owner' AND status = 'Active' AND deleted_at IS NULL
+        WHERE id = u_id AND company_id = c_id AND role = 'Owner' AND status = 'Active' AND deleted_at IS NULL
     );
 $$ LANGUAGE plpgsql SECURITY DEFINER;
 
-CREATE OR REPLACE FUNCTION public.is_company_manager(u_id UUID)
+CREATE OR REPLACE FUNCTION public.is_company_manager(u_id UUID, c_id UUID)
 RETURNS BOOLEAN AS $$
     SELECT EXISTS (
         SELECT 1 FROM public.profiles
-        WHERE id = u_id AND role in ('Owner', 'Manager') AND status = 'Active' AND deleted_at IS NULL
+        WHERE id = u_id AND company_id = c_id AND role in ('Owner', 'Manager') AND status = 'Active' AND deleted_at IS NULL
     );
 $$ LANGUAGE plpgsql SECURITY DEFINER;
 
@@ -105,15 +108,15 @@ create policy "Allow read access to authenticated profiles"
 
 create policy "Allow updates to self profile or managers"
     on public.profiles for update to authenticated
-    using (auth.uid() = id or public.is_company_manager(auth.uid()));
+    using (auth.uid() = id or public.is_company_manager(auth.uid(), company_id));
 
 create policy "Allow insert access to managers"
     on public.profiles for insert to authenticated
-    with check (public.is_company_manager(auth.uid()));
+    with check (public.is_company_manager(auth.uid(), company_id));
 
 create policy "Allow delete access to managers"
     on public.profiles for delete to authenticated
-    using (public.is_company_manager(auth.uid()));
+    using (public.is_company_manager(auth.uid(), company_id));
 
 -- Profile PIN Auto-Hashing Trigger
 CREATE OR REPLACE FUNCTION public.trg_hash_profile_pin()
@@ -145,9 +148,15 @@ create table if not exists public.login_history (
 -- Enable RLS on Login History
 alter table public.login_history enable row level security;
 
-create policy "Allow users to read own login history"
+create policy "Allow users to read own login history or managers"
     on public.login_history for select to authenticated
-    using (auth.uid() = user_id or public.is_company_manager(auth.uid()));
+    using (
+        auth.uid() = user_id or 
+        exists (
+            select 1 from public.profiles 
+            where id = auth.uid() and role in ('Owner', 'Manager') and company_id = (select company_id from public.profiles where id = user_id)
+        )
+    );
 
 -- 7. Money Transfers Table (Owner sending money to staff)
 create table if not exists public.money_transfers (
@@ -174,7 +183,7 @@ create policy "Allow read access to transfers"
 
 create policy "Allow full write access to manager and owners"
     on public.money_transfers for all to authenticated
-    using (public.is_company_manager(auth.uid()));
+    using (public.is_company_manager(auth.uid(), company_id));
 
 -- 8. Incoming Money Table (Staff receiving money from clients/vendors)
 create table if not exists public.incoming_money (
@@ -217,7 +226,7 @@ create policy "Allow staff to update their own pending incoming"
 
 create policy "Allow managers and owners full access to reviews"
     on public.incoming_money for all to authenticated
-    using (public.is_company_manager(auth.uid()));
+    using (public.is_company_manager(auth.uid(), company_id));
 
 -- 9. Expenses Table
 create table if not exists public.expenses (
@@ -253,7 +262,7 @@ create policy "Allow staff to insert their own expenses"
 
 create policy "Allow managers and owners full write access to expenses"
     on public.expenses for all to authenticated
-    using (public.is_company_manager(auth.uid()));
+    using (public.is_company_manager(auth.uid(), company_id));
 
 -- 10. Staff Balances Summary Table (Normalized Cache)
 create table if not exists public.staff_balances (
@@ -272,6 +281,16 @@ create policy "Allow read access to staff balances"
     on public.staff_balances for select to authenticated using (true);
 
 -- Trigger functions for auto-recalculation of staff balances
+CREATE OR REPLACE FUNCTION public.recalculate_staff_balance(p_id UUID)
+RETURNS VOID AS $$
+DECLARE
+    v_received NUMERIC := 0;
+    v_spent NUMERIC := 0;
+    v_company_id UUID;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- (Trigger functions for recalculate_staff_balance body remains identical)
 CREATE OR REPLACE FUNCTION public.recalculate_staff_balance(p_id UUID)
 RETURNS VOID AS $$
 DECLARE
@@ -406,7 +425,7 @@ create policy "Allow read access to notes"
 
 create policy "Allow managers and owners write access to notes"
     on public.notes for all to authenticated
-    using (public.is_company_manager(auth.uid()));
+    using (public.is_company_manager(auth.uid(), company_id));
 
 -- 12. Audit Activity Logs Table
 create table if not exists public.activity_logs (
@@ -424,7 +443,7 @@ alter table public.activity_logs enable row level security;
 
 create policy "Allow managers to view activity logs"
     on public.activity_logs for select to authenticated
-    using (public.is_company_manager(auth.uid()));
+    using (public.is_company_manager(auth.uid(), company_id));
 
 -- 13. Push Notifications Table (With Notification Type check constraints)
 create table if not exists public.notifications (
@@ -433,7 +452,7 @@ create table if not exists public.notifications (
     user_id uuid not null references public.profiles(id) on delete cascade,
     title text not null,
     message text not null,
-    type text not null default 'SYSTEM' check (type in ('PENDING_APPROVAL', 'APPROVED', 'REJECTED', 'SYSTEM', 'REMINDER')), -- Check constraint implemented
+    type text not null default 'SYSTEM' check (type in ('PENDING_APPROVAL', 'APPROVED', 'REJECTED', 'SYSTEM', 'REMINDER')),
     is_read boolean not null default false,
     created_at timestamp with time zone default timezone('utc'::text, now()) not null
 );
@@ -455,8 +474,15 @@ values ('00000000-0000-0000-0000-000000000001', 'Sar Outdoors', 'Active')
 on conflict (id) do nothing;
 
 -- Seed default company settings
-insert into public.company_settings (company_id, timezone, currency)
-values ('00000000-0000-0000-0000-000000000001', 'Asia/Kolkata', 'INR')
+insert into public.company_settings (company_id, timezone, currency, address, email, phone)
+values (
+    '00000000-0000-0000-0000-000000000001', 
+    'Asia/Kolkata', 
+    'INR', 
+    'Dehradun, Uttarakhand, India', 
+    'info@saroutdoors.com', 
+    '+91-9876543210'
+)
 on conflict (company_id) do nothing;
 
 -- Seed Expense Categories
@@ -477,7 +503,7 @@ values
     ('00000000-0000-0000-0000-000000000001', 'Entry Fee', '🎟️', false),
     ('00000000-0000-0000-0000-000000000001', 'Miscellaneous', '📦', false),
     ('00000000-0000-0000-0000-000000000001', 'Other', '❓', false),
-    -- Company Overhead Overhead Categories
+    -- Company Overhead Categories
     ('00000000-0000-0000-0000-000000000001', 'Office Rent', '🏢', true),
     ('00000000-0000-0000-0000-000000000001', 'Salary', '💰', true),
     ('00000000-0000-0000-0000-000000000001', 'Marketing', '📣', true),
@@ -492,26 +518,24 @@ on conflict (company_id, name) do nothing;
 -- PERFORMANCE INDEXES
 -- ====================================================================
 
--- Indexing foreign keys
 create index if not exists idx_profiles_company on public.profiles(company_id);
 create index if not exists idx_money_transfers_staff on public.money_transfers(staff_id);
 create index if not exists idx_incoming_money_creator on public.incoming_money(created_by_id);
 create index if not exists idx_expenses_staff on public.expenses(staff_id);
 create index if not exists idx_expenses_category on public.expenses(category_id);
 
--- Indexing query dates
 create index if not exists idx_money_transfers_date on public.money_transfers(date_time desc);
 create index if not exists idx_expenses_date on public.expenses(date_time desc);
 create index if not exists idx_incoming_money_date on public.incoming_money(date_time desc);
 
 -- ====================================================================
--- STORAGE BUCKETS & POLICIES SETUP (PRIVATE)
+-- STORAGE BUCKETS & POLICIES SETUP (PRIVATE WITH SIGNED/AUTH ACCESS)
 -- ====================================================================
 insert into storage.buckets (id, name, public)
 values ('expense-bills', 'expense-bills', false) -- Private bucket
 on conflict (id) do nothing;
 
--- Secure Storage policies
+-- Secure Storage RLS policies for authenticated users
 create policy "Allow read access to authenticated bills"
     on storage.objects for select to authenticated using (bucket_id = 'expense-bills');
 
@@ -520,4 +544,7 @@ create policy "Allow authenticated upload of bills"
 
 create policy "Allow manager deletion of bills"
     on storage.objects for delete to authenticated
-    using (bucket_id = 'expense-bills' and public.is_company_manager(auth.uid()));
+    using (bucket_id = 'expense-bills' and exists (
+        select 1 from public.profiles 
+        where id = auth.uid() and role in ('Owner', 'Manager') and status = 'Active' and deleted_at is null
+    ));
