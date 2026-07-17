@@ -273,7 +273,7 @@ const db = {
     if (!isOnline()) throw new Error('Database is offline or disconnected.');
     const { data, error } = await supabaseClient
       .from('money_transfers')
-      .select('id, company_id, name, role, status')
+      .select('*')
       .is('deleted_at', null)
       .order('date_time', { ascending: true });
     if (error) throw new Error('Failed to load transfers: ' + error.message);
