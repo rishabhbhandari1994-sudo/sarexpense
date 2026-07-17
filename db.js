@@ -5,7 +5,7 @@ const DB_VERSION = 7;
 
 let dbInstance = null;
 let useInMemoryFallback = false;
-let supabase = null;
+let supabaseClient = null;
 
 // Dynamic Translation Caches
 let profilesCache = [];
@@ -32,30 +32,59 @@ const inMemoryData = {
 };
 
 // Initialize Supabase Client dynamically
+let supabaseConnected = false;
+
+function withTimeout(promise, ms) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("Timeout")), ms);
+    promise.then(
+      (res) => { clearTimeout(timer); resolve(res); },
+      (err) => { clearTimeout(timer); reject(err); }
+    );
+  });
+}
+
 async function initSupabase() {
-  if (supabase) return supabase;
+  if (supabaseClient) return supabaseClient;
   try {
     const res = await fetch('/api/config');
     const config = await res.json();
     if (config.supabaseUrl && config.supabaseAnonKey) {
-      supabase = window.supabase.createClient(config.supabaseUrl, config.supabaseAnonKey);
-      window.supabaseInstance = supabase; // Expose globally for app.js
-      console.log('Supabase initialized successfully.');
+      if (config.supabaseUrl.includes('your-supabase-project')) {
+        console.warn('Placeholder Supabase URL detected. Operating in local offline mode.');
+        return null;
+      }
+      supabaseClient = window.supabase.createClient(config.supabaseUrl, config.supabaseAnonKey);
+      window.supabaseInstance = supabaseClient; // Expose globally for app.js
+      
+      // Ping database with a 2-second timeout to verify connection
+      try {
+        const pingPromise = supabaseClient.from('profiles').select('id').limit(1);
+        const { error } = await withTimeout(pingPromise, 2000);
+        if (!error) {
+          supabaseConnected = true;
+          console.log('Supabase initialized & verified online.');
+        } else {
+          console.warn('Supabase online ping returned database error:', error);
+        }
+      } catch (pingErr) {
+        console.warn('Supabase online ping timed out or failed:', pingErr);
+      }
     } else {
       console.warn('Supabase URL/Key missing. Local offline mode enabled.');
     }
   } catch (err) {
     console.error('Failed to query api config:', err);
   }
-  return supabase;
+  return supabaseClient;
 }
 
 function isOnline() {
-  return navigator.onLine && supabase !== null;
+  return navigator.onLine && supabaseClient !== null && supabaseConnected;
 }
 
 async function uploadBase64ToStorage(base64Data, filename) {
-  if (!supabase) return null;
+  if (!supabaseClient) return null;
   try {
     const parts = base64Data.split(';base64,');
     if (parts.length < 2) return null;
@@ -68,7 +97,7 @@ async function uploadBase64ToStorage(base64Data, filename) {
     }
     const blob = new Blob([uInt8Array], { type: contentType });
 
-    const { data, error } = await supabase.storage
+    const { data, error } = await supabaseClient.storage
       .from('expense-bills')
       .upload(filename, blob, {
         cacheControl: '3600',
@@ -80,7 +109,7 @@ async function uploadBase64ToStorage(base64Data, filename) {
       return null;
     }
 
-    const { data: publicUrlData } = supabase.storage
+    const { data: publicUrlData } = supabaseClient.storage
       .from('expense-bills')
       .getPublicUrl(filename);
 
@@ -95,10 +124,10 @@ async function uploadBase64ToStorage(base64Data, filename) {
 async function refreshDBCaches() {
   if (!isOnline()) return;
   try {
-    const { data: pData } = await supabase.from('profiles').select('*').is('deleted_at', null);
+    const { data: pData } = await supabaseClient.from('profiles').select('*').is('deleted_at', null);
     if (pData) profilesCache = pData;
     
-    const { data: cData } = await supabase.from('expense_categories').select('*');
+    const { data: cData } = await supabaseClient.from('expense_categories').select('*');
     if (cData) categoriesCache = cData;
   } catch (e) {
     console.warn('Failed to refresh dynamic caches:', e);
@@ -298,7 +327,7 @@ const db = {
   async getCashTransactions() {
     if (isOnline()) {
       try {
-        const { data, error } = await supabase
+        const { data, error } = await supabaseClient
           .from('money_transfers')
           .select('*')
           .is('deleted_at', null)
@@ -326,7 +355,7 @@ const db = {
 
     if (isOnline()) {
       try {
-        const { error } = await supabase.from('money_transfers').upsert(toSupabaseTx(tx));
+        const { error } = await supabaseClient.from('money_transfers').upsert(toSupabaseTx(tx));
         if (!error) {
           tx.pendingSync = false;
           if (!useInMemoryFallback) {
@@ -344,7 +373,7 @@ const db = {
   async getExpenses() {
     if (isOnline()) {
       try {
-        const { data, error } = await supabase
+        const { data, error } = await supabaseClient
           .from('expenses')
           .select('*')
           .is('deleted_at', null)
@@ -381,7 +410,7 @@ const db = {
           }
         }
 
-        const { error } = await supabase.from('expenses').upsert(toSupabaseExp(expense));
+        const { error } = await supabaseClient.from('expenses').upsert(toSupabaseExp(expense));
         if (!error) {
           expense.pendingSync = false;
           if (!useInMemoryFallback) {
@@ -409,7 +438,7 @@ const db = {
     if (isOnline()) {
       try {
         // Implement soft delete to preserve historical audit logs in production
-        await supabase.from('expenses').update({ deleted_at: new Date().toISOString() }).eq('id', id);
+        await supabaseClient.from('expenses').update({ deleted_at: new Date().toISOString() }).eq('id', id);
       } catch (err) {
         console.error('Supabase expense deletion error:', err);
       }
@@ -421,7 +450,7 @@ const db = {
   async getStaff() {
     if (isOnline()) {
       try {
-        const { data, error } = await supabase
+        const { data, error } = await supabaseClient
           .from('profiles')
           .select('*')
           .is('deleted_at', null)
@@ -464,7 +493,7 @@ const db = {
         const email = `${staffMember.name.toLowerCase()}@saroutdoors.com`;
         const password = `saroutdoors-pin${staffMember.pin}`;
         
-        const { data, error } = await supabase.auth.signUp({ email, password });
+        const { data, error } = await supabaseClient.auth.signUp({ email, password });
         const userId = data?.user?.id || staffMember.id;
         
         const profile = {
@@ -478,7 +507,7 @@ const db = {
           status: staffMember.status || 'Active'
         };
 
-        const { error: dbErr } = await supabase.from('profiles').upsert(profile);
+        const { error: dbErr } = await supabaseClient.from('profiles').upsert(profile);
         if (dbErr) console.error('Error writing profile to Supabase:', dbErr);
         
         await refreshDBCaches();
@@ -502,7 +531,7 @@ const db = {
 
     if (isOnline()) {
       try {
-        await supabase.from('profiles').update({ deleted_at: new Date().toISOString() }).eq('id', id);
+        await supabaseClient.from('profiles').update({ deleted_at: new Date().toISOString() }).eq('id', id);
       } catch (err) {
         console.error('Supabase staff delete error:', err);
       }
@@ -514,7 +543,7 @@ const db = {
   async getNotes() {
     if (isOnline()) {
       try {
-        const { data, error } = await supabase
+        const { data, error } = await supabaseClient
           .from('notes')
           .select('*')
           .order('created_at', { ascending: false });
@@ -559,7 +588,7 @@ const db = {
           created_at: note.createdAt || new Date().toISOString(),
           company_id: '00000000-0000-0000-0000-000000000001'
         };
-        await supabase.from('notes').upsert(dbNote);
+        await supabaseClient.from('notes').upsert(dbNote);
       } catch (err) {
         console.error('Supabase note write error:', err);
       }
@@ -576,7 +605,7 @@ const db = {
 
     if (isOnline()) {
       try {
-        await supabase.from('notes').delete().eq('id', id);
+        await supabaseClient.from('notes').delete().eq('id', id);
       } catch (err) {
         console.error('Supabase note delete error:', err);
       }
@@ -588,7 +617,7 @@ const db = {
   async getIncomingMoney() {
     if (isOnline()) {
       try {
-        const { data, error } = await supabase
+        const { data, error } = await supabaseClient
           .from('incoming_money')
           .select('*')
           .is('deleted_at', null)
@@ -626,7 +655,7 @@ const db = {
           }
         }
 
-        const { error } = await supabase.from('incoming_money').upsert(toSupabaseInc(record));
+        const { error } = await supabaseClient.from('incoming_money').upsert(toSupabaseInc(record));
         if (!error) {
           record.pendingSync = false;
           if (!useInMemoryFallback) {
@@ -654,7 +683,7 @@ const db = {
     if (isOnline()) {
       try {
         // Use soft delete
-        await supabase.from('incoming_money').update({ deleted_at: new Date().toISOString() }).eq('id', id);
+        await supabaseClient.from('incoming_money').update({ deleted_at: new Date().toISOString() }).eq('id', id);
       } catch (err) {
         console.error('Supabase incoming money delete error:', err);
       }
@@ -682,10 +711,10 @@ const db = {
   async resetAllData() {
     if (isOnline()) {
       try {
-        await supabase.from('money_transfers').delete().neq('id', '00000000-0000-0000-0000-000000000000');
-        await supabase.from('expenses').delete().neq('id', '00000000-0000-0000-0000-000000000000');
-        await supabase.from('incoming_money').delete().neq('id', '00000000-0000-0000-0000-000000000000');
-        await supabase.from('notes').delete().neq('id', '00000000-0000-0000-0000-000000000000');
+        await supabaseClient.from('money_transfers').delete().neq('id', '00000000-0000-0000-0000-000000000000');
+        await supabaseClient.from('expenses').delete().neq('id', '00000000-0000-0000-0000-000000000000');
+        await supabaseClient.from('incoming_money').delete().neq('id', '00000000-0000-0000-0000-000000000000');
+        await supabaseClient.from('notes').delete().neq('id', '00000000-0000-0000-0000-000000000000');
       } catch (err) {
         console.error('Supabase server reset data error:', err);
       }
@@ -713,21 +742,23 @@ const db = {
           const profile = {
             id: s.id,
             name: s.name,
+            email: s.email || `${s.name.toLowerCase()}@saroutdoors.com`,
+            phone: s.phone || `+91-${s.name.toLowerCase()}-${Date.now()}`,
             role: s.role,
             pin: s.pin,
             company_id: '00000000-0000-0000-0000-000000000001',
             status: s.status || 'Active'
           };
-          await supabase.from('profiles').upsert(profile);
+          await supabaseClient.from('profiles').upsert(profile);
         }
         for (const t of txList) {
-          await supabase.from('money_transfers').upsert(toSupabaseTx(t));
+          await supabaseClient.from('money_transfers').upsert(toSupabaseTx(t));
         }
         for (const e of expList) {
-          await supabase.from('expenses').upsert(toSupabaseExp(e));
+          await supabaseClient.from('expenses').upsert(toSupabaseExp(e));
         }
         for (const i of incomingList) {
-          await supabase.from('incoming_money').upsert(toSupabaseInc(i));
+          await supabaseClient.from('incoming_money').upsert(toSupabaseInc(i));
         }
       } catch (err) {
         console.error('Overwrite Supabase restore failed:', err);
@@ -771,7 +802,7 @@ const db = {
       const localTxs = useInMemoryFallback ? inMemoryData.cash_transactions : await runTx('cash_transactions', 'readonly', (store) => prom(store.getAll()));
       const pendingTxs = localTxs.filter(t => t.pendingSync);
       for (const t of pendingTxs) {
-        const { error } = await supabase.from('money_transfers').upsert(toSupabaseTx(t));
+        const { error } = await supabaseClient.from('money_transfers').upsert(toSupabaseTx(t));
         if (!error) {
           t.pendingSync = false;
           if (!useInMemoryFallback) await runTx('cash_transactions', 'readwrite', (store) => prom(store.put(t)));
@@ -788,7 +819,7 @@ const db = {
           const publicUrl = await uploadBase64ToStorage(e.receiptPhoto, filename);
           if (publicUrl) e.receiptPhoto = publicUrl;
         }
-        const { error } = await supabase.from('expenses').upsert(toSupabaseExp(e));
+        const { error } = await supabaseClient.from('expenses').upsert(toSupabaseExp(e));
         if (!error) {
           e.pendingSync = false;
           if (!useInMemoryFallback) await runTx('expenses', 'readwrite', (store) => prom(store.put(e)));
@@ -805,7 +836,7 @@ const db = {
           const publicUrl = await uploadBase64ToStorage(i.proofPhoto, filename);
           if (publicUrl) i.proofPhoto = publicUrl;
         }
-        const { error } = await supabase.from('incoming_money').upsert(toSupabaseInc(i));
+        const { error } = await supabaseClient.from('incoming_money').upsert(toSupabaseInc(i));
         if (!error) {
           i.pendingSync = false;
           if (!useInMemoryFallback) await runTx('incoming_money', 'readwrite', (store) => prom(store.put(i)));
