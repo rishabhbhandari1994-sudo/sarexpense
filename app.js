@@ -1,4 +1,5 @@
 // app.js - TrailCash Main Application Logic
+const BUILD_VERSION = '1.0.5';
 
 const CATEGORIES = [
   { name: 'Ration', emoji: '🌾' },
@@ -73,6 +74,7 @@ const app = {
 
   // Initialize App
   async init() {
+    console.log("App Version:", BUILD_VERSION);
     console.log('TrailCash app initializing...');
     
     // Bind form event handlers
@@ -91,7 +93,10 @@ const app = {
         const profile = this.data.staff.find(staff => staff.id === user?.id);
         if (profile) this.currentUser = profile.name;
       } else {
-        this.data.staff = await window.TrailCashDB.getLoginProfiles();
+        const profiles = await window.TrailCashDB.getLoginProfiles();
+        console.log("Profiles from API:", profiles);
+        this.data.staff = profiles;
+        console.log("this.data.staff (login mode):", this.data.staff);
       }
 
       // Setup login profiles grid
@@ -148,6 +153,7 @@ const app = {
 
   async refreshData() {
     this.data.staff = await window.TrailCashDB.getStaff();
+    console.log("this.data.staff modified in refreshData:", this.data.staff);
     this.data.transactions = await window.TrailCashDB.getCashTransactions();
     this.data.expenses = await window.TrailCashDB.getExpenses();
     this.data.incoming_money = await window.TrailCashDB.getIncomingMoney();
@@ -155,7 +161,7 @@ const app = {
 
   // Active staff helper
   get STAFF_LIST() {
-    return this.data.staff.filter(s => s.role === 'Staff' && s.status === 'Active');
+    return this.data.staff.filter(s => s.role === 'Staff' && (s.status === 'Active' || s.status === undefined));
   },
 
   // Theme support
@@ -294,6 +300,8 @@ const app = {
     const all = [];
     if (owner) all.push(owner);
     all.push(...staff);
+
+    console.log("Profiles being rendered:", all);
 
     all.forEach(u => {
       const card = document.createElement('div');
