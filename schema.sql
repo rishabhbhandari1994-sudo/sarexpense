@@ -57,9 +57,8 @@ RETURNS BOOLEAN AS $$
     );
 $$ LANGUAGE sql SECURITY DEFINER;
 
--- Profiles Policies
-create policy "Allow read access to authenticated profiles"
-    on public.profiles for select to authenticated using (deleted_at is null);
+create policy "Allow public select access to active profiles"
+    on public.profiles for select using (deleted_at is null);
 
 create policy "Allow updates to self profile or managers"
     on public.profiles for update to authenticated
