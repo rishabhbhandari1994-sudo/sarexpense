@@ -20,61 +20,16 @@ alter table public.companies enable row level security;
 create policy "Allow read access to authenticated company tenant"
     on public.companies for select to authenticated using (true);
 
--- 2. Company Settings Table (GSTIN, Address, Branding, Timezone, Currency)
-create table if not exists public.company_settings (
-    company_id uuid primary key references public.companies(id) on delete cascade,
-    logo_url text,
-    gstin text,
-    address text,
-    phone text,
-    email text,
-    timezone text not null default 'Asia/Kolkata',
-    currency text not null default 'INR',
-    branding_colors jsonb not null default '{}'::jsonb,
-    created_at timestamp with time zone default timezone('utc'::text, now()) not null,
-    updated_at timestamp with time zone default timezone('utc'::text, now()) not null
-);
-
--- Enable RLS on Company Settings
-alter table public.company_settings enable row level security;
-
-create policy "Allow read access to company settings"
-    on public.company_settings for select to authenticated using (true);
-
-create policy "Allow owners to edit settings"
-    on public.company_settings for all to authenticated
-    using (exists (
-        select 1 from public.profiles
-        where id = auth.uid() and role = 'Owner'
-    ));
-
--- 3. Expense Categories Table (Normalized Lookup)
-create table if not exists public.expense_categories (
-    id uuid primary key default gen_random_uuid(),
-    company_id uuid not null references public.companies(id) on delete cascade,
-    name text not null,
-    emoji text not null default '📦',
-    is_company_overhead boolean not null default false,
-    created_at timestamp with time zone default timezone('utc'::text, now()) not null,
-    updated_at timestamp with time zone default timezone('utc'::text, now()) not null,
-    constraint unique_company_category_name unique (company_id, name)
-);
-
--- Enable RLS on Categories
-alter table public.expense_categories enable row level security;
-
-create policy "Allow read access to expense categories"
-    on public.expense_categories for select to authenticated using (true);
-
--- 4. Profiles Table (extending auth.users)
+-- 2. Profiles Table (extending auth.users)
+-- (Created early to satisfy foreign keys and policy checks in settings/categories)
 create table if not exists public.profiles (
     id uuid primary key references auth.users(id) on delete cascade,
     company_id uuid not null references public.companies(id) on delete cascade,
     name text not null, -- Removed UNIQUE constraint from name
     email text not null unique,
-    phone text not null unique, -- Added unique phone field for user identity verification
+    phone text not null unique, -- Unique phone identifier
     role text not null check (role in ('Owner', 'Manager', 'Staff')),
-    pin text not null, -- Hashed PIN code via database triggers
+    pin text not null, -- Hashed PIN code via triggers
     status text not null default 'Active' check (status in ('Active', 'Suspended')),
     created_at timestamp with time zone default timezone('utc'::text, now()) not null,
     updated_at timestamp with time zone default timezone('utc'::text, now()) not null,
@@ -85,14 +40,14 @@ create table if not exists public.profiles (
 -- Enable RLS on Profiles
 alter table public.profiles enable row level security;
 
--- 5. RLS Security Definer Optimization Helpers (Multi-Tenant Company validation)
+-- 3. RLS Security Definer Optimization Helpers
 CREATE OR REPLACE FUNCTION public.is_company_owner(u_id UUID, c_id UUID)
 RETURNS BOOLEAN AS $$
     SELECT EXISTS (
         SELECT 1 FROM public.profiles
         WHERE id = u_id AND company_id = c_id AND role = 'Owner' AND status = 'Active' AND deleted_at IS NULL
     );
-$$ LANGUAGE plpgsql SECURITY DEFINER;
+$$ LANGUAGE sql SECURITY DEFINER;
 
 CREATE OR REPLACE FUNCTION public.is_company_manager(u_id UUID, c_id UUID)
 RETURNS BOOLEAN AS $$
@@ -100,7 +55,7 @@ RETURNS BOOLEAN AS $$
         SELECT 1 FROM public.profiles
         WHERE id = u_id AND company_id = c_id AND role in ('Owner', 'Manager') AND status = 'Active' AND deleted_at IS NULL
     );
-$$ LANGUAGE plpgsql SECURITY DEFINER;
+$$ LANGUAGE sql SECURITY DEFINER;
 
 -- Profiles Policies
 create policy "Allow read access to authenticated profiles"
@@ -134,6 +89,49 @@ $$ LANGUAGE plpgsql SECURITY DEFINER;
 create trigger hash_profile_pin_trigger
     before insert or update on public.profiles
     for each row execute function public.trg_hash_profile_pin();
+
+-- 4. Company Settings Table (GSTIN, Address, Branding, Timezone, Currency)
+create table if not exists public.company_settings (
+    company_id uuid primary key references public.companies(id) on delete cascade,
+    logo_url text,
+    gstin text,
+    address text,
+    phone text,
+    email text,
+    timezone text not null default 'Asia/Kolkata',
+    currency text not null default 'INR',
+    branding_colors jsonb not null default '{}'::jsonb,
+    created_at timestamp with time zone default timezone('utc'::text, now()) not null,
+    updated_at timestamp with time zone default timezone('utc'::text, now()) not null
+);
+
+-- Enable RLS on Company Settings
+alter table public.company_settings enable row level security;
+
+create policy "Allow read access to company settings"
+    on public.company_settings for select to authenticated using (true);
+
+create policy "Allow owners to edit settings"
+    on public.company_settings for all to authenticated
+    using (public.is_company_owner(auth.uid(), company_id));
+
+-- 5. Expense Categories Table (Normalized Lookup)
+create table if not exists public.expense_categories (
+    id uuid primary key default gen_random_uuid(),
+    company_id uuid not null references public.companies(id) on delete cascade,
+    name text not null,
+    emoji text not null default '📦',
+    is_company_overhead boolean not null default false,
+    created_at timestamp with time zone default timezone('utc'::text, now()) not null,
+    updated_at timestamp with time zone default timezone('utc'::text, now()) not null,
+    constraint unique_company_category_name unique (company_id, name)
+);
+
+-- Enable RLS on Categories
+alter table public.expense_categories enable row level security;
+
+create policy "Allow read access to expense categories"
+    on public.expense_categories for select to authenticated using (true);
 
 -- 6. Login History Table (Audit trace logins and user-agents)
 create table if not exists public.login_history (
@@ -281,16 +279,6 @@ create policy "Allow read access to staff balances"
     on public.staff_balances for select to authenticated using (true);
 
 -- Trigger functions for auto-recalculation of staff balances
-CREATE OR REPLACE FUNCTION public.recalculate_staff_balance(p_id UUID)
-RETURNS VOID AS $$
-DECLARE
-    v_received NUMERIC := 0;
-    v_spent NUMERIC := 0;
-    v_company_id UUID;
-END;
-$$ LANGUAGE plpgsql SECURITY DEFINER;
-
--- (Trigger functions for recalculate_staff_balance body remains identical)
 CREATE OR REPLACE FUNCTION public.recalculate_staff_balance(p_id UUID)
 RETURNS VOID AS $$
 DECLARE
