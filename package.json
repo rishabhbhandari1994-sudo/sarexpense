@@ -3,5 +3,10 @@
   "version": "1.0.0",
   "type": "module",
   "private": true,
+  "engines": { "node": ">=22 <23" },
+  "scripts": {
+    "test": "python test_suite.py",
+    "start": "python server.py"
+  },
   "dependencies": {}
 }

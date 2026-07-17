@@ -30,6 +30,10 @@ const COMPANY_EXPENSE_CATEGORIES = [
   'Miscellaneous'
 ];
 
+// Supabase primary keys are UUIDs. Keep generated client records compatible
+// with Postgres instead of using legacy `expense-123` style identifiers.
+const newRecordId = () => crypto.randomUUID();
+
 const app = {
   // Global State
   currentUser: null, // Logged in profile name
@@ -77,12 +81,18 @@ const app = {
     this.initLanguage();
 
     try {
-      // Connect to IndexedDB wrapper (TrailCashDB)
+      // Connect to the Supabase-backed data layer.
       await window.TrailCashDB.initAndSeed();
-      
-      // First sync attempt
-      await this.syncWithServer();
-      await this.refreshData();
+
+      const { data: { session } } = await window.supabaseInstance.auth.getSession();
+      if (session) {
+        await this.refreshData();
+        const { data: { user } } = await window.supabaseInstance.auth.getUser();
+        const profile = this.data.staff.find(staff => staff.id === user?.id);
+        if (profile) this.currentUser = profile.name;
+      } else {
+        this.data.staff = await window.TrailCashDB.getLoginProfiles();
+      }
 
       // Setup login profiles grid
       this.renderLoginProfiles();
@@ -114,7 +124,7 @@ const app = {
       window.addEventListener('offline', () => this.handleNetworkChange(false));
       this.syncNetworkUI();
 
-      this.showToast('TrailCash Database Loaded & Synced!', 'success');
+      this.showToast('TrailCash is ready.', 'success');
     } catch (err) {
       console.error('Init error:', err);
       this.showToast('Database error: ' + (err.message || err) + '. Using offline fallback.', 'warning');
@@ -123,6 +133,7 @@ const app = {
   },
 
   async syncWithServer() {
+    if (!this.currentUser) return;
     try {
       await window.TrailCashDB.syncOfflineQueue();
       await this.refreshData();
@@ -333,20 +344,21 @@ const app = {
     if (this.enteredPin.length === 4) {
       let loginSuccess = false;
       let errMsg = '';
-      const email = `${this.loginSelectedUser.name.toLowerCase()}@saroutdoors.com`;
-      const password = `saroutdoors-pin${this.enteredPin}`;
-
       if (window.supabaseInstance) {
         try {
-          const { data, error } = await window.supabaseInstance.auth.signInWithPassword({
-            email,
-            password
+          const response = await fetch('/api/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ profileId: this.loginSelectedUser.id, pin: this.enteredPin })
           });
-          if (!error && data?.user) {
+          const payload = await response.json();
+          if (response.ok && payload.session?.access_token) {
+            const { error } = await window.supabaseInstance.auth.setSession(payload.session);
+            if (error) throw error;
+            await this.refreshData();
             loginSuccess = true;
           } else {
-            errMsg = error ? error.message : 'Unknown error';
-            console.warn('Supabase Auth login failed:', error);
+            errMsg = payload.error || 'Unknown error';
           }
         } catch (err) {
           errMsg = err.message || err;
@@ -1791,7 +1803,7 @@ const app = {
     const dateTime = `${dateVal}T${timeVal || '12:00'}:00`;
 
     const newCompanyExp = {
-      id: 'co-exp-' + Date.now(),
+      id: newRecordId(),
       dateTime,
       category,
       amount,
@@ -1878,7 +1890,7 @@ const app = {
     }
 
     const newStaff = {
-      id: 'staff-' + Date.now(),
+      id: newRecordId(),
       name,
       pin,
       role: 'Staff',
@@ -1910,7 +1922,7 @@ const app = {
 
     document.getElementById('editStaffId').value = staff.id;
     document.getElementById('editStaffNameInput').value = staff.name;
-    document.getElementById('editStaffPinInput').value = staff.pin;
+    document.getElementById('editStaffPinInput').value = '';
 
     this.openModal('editStaffModal');
   },
@@ -1921,8 +1933,8 @@ const app = {
     const name = document.getElementById('editStaffNameInput').value.trim();
     const pin = document.getElementById('editStaffPinInput').value.trim();
 
-    if (!/^[0-9]{4}$/.test(pin)) {
-      this.showToast('PIN must be exactly 4 digits.', 'warning');
+    if (pin && !/^[0-9]{4}$/.test(pin)) {
+      this.showToast('PIN must be exactly 4 digits when changing it.', 'warning');
       return;
     }
 
@@ -1941,7 +1953,7 @@ const app = {
     // Update transactions and expenses staff names for consistency
     const oldName = staff.name;
     staff.name = name;
-    staff.pin = pin;
+    if (pin) staff.pin = pin;
 
     try {
       await window.TrailCashDB.updateStaff(staff);
@@ -2041,7 +2053,7 @@ const app = {
     const dateTime = `${dateVal}T${timeVal || '12:00'}:00`;
 
     const newTx = {
-      id: 'tx-' + Date.now(),
+      id: newRecordId(),
       dateTime,
       amount,
       mode,
@@ -2254,7 +2266,7 @@ const app = {
     const dateTime = `${dateVal}T${timeVal || '12:00'}:00`;
 
     const newExpense = {
-      id: 'exp-' + Date.now(),
+      id: newRecordId(),
       dateTime,
       staffName: this.currentUser,
       category: this.selectedCategory,
@@ -2420,7 +2432,7 @@ const app = {
     const dateTime = `${dateVal}T${timeVal || '12:00'}:00`;
 
     const newRecord = {
-      id: 'inc-' + Date.now(),
+      id: newRecordId(),
       dateTime,
       amount,
       receivedFrom: finalReceivedFrom,

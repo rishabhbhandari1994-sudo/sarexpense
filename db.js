@@ -5,18 +5,7 @@ let supabaseClient = null;
 // Dynamic Translation Caches
 let profilesCache = [];
 let categoriesCache = [];
-
-// Default Seed Data
-const DEFAULT_STAFF = [
-  { id: 'staff-rishabh', name: 'Rishabh', pin: '1111', role: 'Owner', status: 'Active' },
-  { id: 'staff-shubham', name: 'Shubham', pin: '1234', role: 'Staff', status: 'Active' },
-  { id: 'staff-devraj', name: 'Devraj', pin: '1234', role: 'Staff', status: 'Active' },
-  { id: 'staff-yash', name: 'Yash', pin: '1234', role: 'Staff', status: 'Active' },
-  { id: 'staff-yashpal', name: 'Yashpal', pin: '1234', role: 'Staff', status: 'Active' },
-  { id: 'staff-mayank', name: 'Mayank', pin: '1234', role: 'Staff', status: 'Active' },
-  { id: 'staff-upendra', name: 'Upendra', pin: '1234', role: 'Staff', status: 'Active' },
-  { id: 'staff-bonus', name: 'Bonus', pin: '1234', role: 'Staff', status: 'Active' }
-];
+const DEFAULT_COMPANY_ID = '00000000-0000-0000-0000-000000000001';
 
 // Initialize Supabase Client dynamically
 let supabaseConnected = false;
@@ -46,7 +35,7 @@ async function initSupabase() {
       
       // Ping database with a 2-second timeout to verify connection
       try {
-        const pingPromise = supabaseClient.from('profiles').select('id').limit(1);
+        const pingPromise = supabaseClient.auth.getSession();
         const { error } = await withTimeout(pingPromise, 2000);
         if (!error) {
           supabaseConnected = true;
@@ -68,6 +57,19 @@ async function initSupabase() {
 
 function isOnline() {
   return navigator.onLine && supabaseClient !== null && supabaseConnected;
+}
+
+async function authorizedApi(path, method, body) {
+  const { data: { session } } = await supabaseClient.auth.getSession();
+  if (!session?.access_token) throw new Error('Your session has expired. Please log in again.');
+  const response = await fetch(path, {
+    method,
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` },
+    body: body ? JSON.stringify(body) : undefined
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload.error || 'Request failed.');
+  return payload;
 }
 
 async function uploadBase64ToStorage(base64Data, filename) {
@@ -259,12 +261,19 @@ function toSupabaseInc(inc) {
 }
 
 const db = {
+  async getLoginProfiles() {
+    const response = await fetch('/api/login-profiles');
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.error || 'Failed to load sign-in profiles.');
+    return payload.profiles;
+  },
+
   // Cash Transactions CRUD
   async getCashTransactions() {
     if (!isOnline()) throw new Error('Database is offline or disconnected.');
     const { data, error } = await supabaseClient
       .from('money_transfers')
-      .select('*')
+      .select('id, company_id, name, role, status')
       .is('deleted_at', null)
       .order('date_time', { ascending: true });
     if (error) throw new Error('Failed to load transfers: ' + error.message);
@@ -297,7 +306,7 @@ const db = {
     if (!isOnline()) throw new Error('Database is offline or disconnected.');
     if (expense.receiptPhoto && expense.receiptPhoto.startsWith('data:')) {
       const ext = expense.receiptPhoto.includes('image/png') ? 'png' : 'jpg';
-      const filename = `expense-${expense.id}-${Date.now()}.${ext}`;
+      const filename = `${DEFAULT_COMPANY_ID}/expense-${expense.id}-${Date.now()}.${ext}`;
       const savedFilename = await uploadBase64ToStorage(expense.receiptPhoto, filename);
       if (savedFilename) {
         expense.receiptPhoto = savedFilename;
@@ -335,7 +344,7 @@ const db = {
     if (!isOnline()) throw new Error('Database is offline or disconnected.');
     const { data, error } = await supabaseClient
       .from('profiles')
-      .select('*')
+      .select('id, company_id, name, role, status')
       .is('deleted_at', null)
       .order('name', { ascending: true });
     if (error) throw new Error('Failed to load staff roster: ' + error.message);
@@ -345,62 +354,30 @@ const db = {
         id: dbProf.id,
         name: dbProf.name,
         role: dbProf.role,
-        pin: dbProf.pin,
+        pin: '••••',
         status: dbProf.status,
-        phone: dbProf.phone,
-        email: dbProf.email
+        company_id: dbProf.company_id
       };
     });
   },
 
   async addStaff(staffMember) {
     if (!isOnline()) throw new Error('Database is offline or disconnected.');
-    const email = `${staffMember.name.toLowerCase()}@saroutdoors.com`;
-    const password = `saroutdoors-pin${staffMember.pin}`;
-    
-    // Auth Signup
-    const { data, error } = await supabaseClient.auth.signUp({ email, password });
-    const userId = data?.user?.id || staffMember.id;
-    
-    const profile = {
-      id: userId,
-      name: staffMember.name,
-      email: email,
-      phone: staffMember.phone || `+91-${staffMember.name.toLowerCase()}-${Date.now()}`,
-      role: staffMember.role,
-      pin: staffMember.pin,
-      company_id: '00000000-0000-0000-0000-000000000001',
-      status: staffMember.status || 'Active'
-    };
-
-    const { error: dbErr } = await supabaseClient.from('profiles').upsert(profile);
-    if (dbErr) throw new Error('Failed to save staff profile: ' + dbErr.message);
-    
+    await authorizedApi('/api/staff', 'POST', staffMember);
     await refreshDBCaches();
     return staffMember;
   },
 
   async updateStaff(staffMember) {
     if (!isOnline()) throw new Error('Database is offline or disconnected.');
-    const profile = {
-      id: staffMember.id,
-      name: staffMember.name,
-      role: staffMember.role,
-      status: staffMember.status || 'Active'
-    };
-    if (staffMember.pin) {
-      profile.pin = staffMember.pin;
-    }
-    const { error: dbErr } = await supabaseClient.from('profiles').upsert(profile);
-    if (dbErr) throw new Error('Failed to update staff profile: ' + dbErr.message);
+    await authorizedApi(`/api/staff?id=${encodeURIComponent(staffMember.id)}`, 'PATCH', staffMember);
     await refreshDBCaches();
     return staffMember;
   },
 
   async deleteStaff(id) {
     if (!isOnline()) throw new Error('Database is offline or disconnected.');
-    const { error } = await supabaseClient.from('profiles').update({ deleted_at: new Date().toISOString() }).eq('id', id);
-    if (error) throw new Error('Failed to delete staff: ' + error.message);
+    await authorizedApi(`/api/staff?id=${encodeURIComponent(id)}`, 'DELETE');
     return id;
   },
 
@@ -467,7 +444,7 @@ const db = {
     if (!isOnline()) throw new Error('Database is offline or disconnected.');
     if (record.proofPhoto && record.proofPhoto.startsWith('data:')) {
       const ext = record.proofPhoto.includes('image/png') ? 'png' : 'jpg';
-      const filename = `incoming-${record.id}-${Date.now()}.${ext}`;
+      const filename = `${DEFAULT_COMPANY_ID}/incoming-${record.id}-${Date.now()}.${ext}`;
       const savedFilename = await uploadBase64ToStorage(record.proofPhoto, filename);
       if (savedFilename) {
         record.proofPhoto = savedFilename;
@@ -510,62 +487,21 @@ const db = {
     if (err1 || err2 || err3 || err4) throw new Error('Failed to reset database tables on Supabase.');
   },
 
-  // Restore dataset directly to Supabase
-  async overwriteAllLocalData(staffList, txList, expList, incomingList = []) {
-    if (!isOnline()) throw new Error('Database is offline or disconnected.');
-    try {
-      for (const s of staffList) {
-        const profile = {
-          id: s.id,
-          name: s.name,
-          email: s.email || `${s.name.toLowerCase()}@saroutdoors.com`,
-          phone: s.phone || `+91-${s.name.toLowerCase()}-${Date.now()}`,
-          role: s.role,
-          pin: s.pin,
-          company_id: '00000000-0000-0000-0000-000000000001',
-          status: s.status || 'Active'
-        };
-        await supabaseClient.from('profiles').upsert(profile);
-      }
-      for (const t of txList) {
-        await supabaseClient.from('money_transfers').upsert(toSupabaseTx(t));
-      }
-      for (const e of expList) {
-        await supabaseClient.from('expenses').upsert(toSupabaseExp(e));
-      }
-      for (const i of incomingList) {
-        await supabaseClient.from('incoming_money').upsert(toSupabaseInc(i));
-      }
-    } catch (err) {
-      throw new Error('Supabase restore failed: ' + err.message);
-    }
-  },
-
   async syncOfflineQueue() {
     // Obsolete: direct integration no-op
   },
 
-  // Setup database connection and seed defaults if empty
+  // Setup the authenticated database connection. Initial owner provisioning is
+  // deliberately performed outside the browser; client-side seeding cannot
+  // create auth.users safely under RLS.
   async initAndSeed() {
     await initSupabase();
     if (!isOnline()) {
       console.warn('Database is offline. Direct data connection unavailable.');
       return;
     }
-    await refreshDBCaches();
-
-    try {
-      // Seed default roster if empty in database
-      const staffList = await this.getStaff();
-      if (staffList.length === 0) {
-        console.log('Seeding default profiles to Supabase...');
-        for (const s of DEFAULT_STAFF) {
-          await this.addStaff(s);
-        }
-      }
-    } catch (err) {
-      console.warn('DB initialization failed:', err);
-    }
+    const { data: { session } } = await supabaseClient.auth.getSession();
+    if (session) await refreshDBCaches();
   }
 };
 
