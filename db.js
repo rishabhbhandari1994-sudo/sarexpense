@@ -1,10 +1,5 @@
-// db.js - Supabase & IndexedDB Sync Layer for TrailCash (Sar Outdoors Enterprise)
+// db.js - Supabase Direct Integration for TrailCash (Sar Outdoors Enterprise)
 
-const DB_NAME = 'TrailCashDB';
-const DB_VERSION = 7;
-
-let dbInstance = null;
-let useInMemoryFallback = false;
 let supabaseClient = null;
 
 // Dynamic Translation Caches
@@ -22,14 +17,6 @@ const DEFAULT_STAFF = [
   { id: 'staff-upendra', name: 'Upendra', pin: '1234', role: 'Staff', status: 'Active' },
   { id: 'staff-bonus', name: 'Bonus', pin: '1234', role: 'Staff', status: 'Active' }
 ];
-
-const inMemoryData = {
-  cash_transactions: [],
-  expenses: [],
-  staff: [...DEFAULT_STAFF],
-  notes: [],
-  incoming_money: []
-};
 
 // Initialize Supabase Client dynamically
 let supabaseConnected = false;
@@ -106,17 +93,33 @@ async function uploadBase64ToStorage(base64Data, filename) {
 
     if (error) {
       console.error('Supabase Storage upload error:', error);
-      return null;
+      throw error;
     }
 
-    const { data: publicUrlData } = supabaseClient.storage
-      .from('expense-bills')
-      .getPublicUrl(filename);
-
-    return publicUrlData.publicUrl;
+    return filename; // Return relative filename path
   } catch (err) {
     console.error('Storage upload error:', err);
-    return null;
+    throw err;
+  }
+}
+
+// Bulk signed URL resolver for private bucket images
+async function resolveSignedUrls(rows, pathField, urlField) {
+  const paths = rows.map(r => r[pathField]).filter(p => p && !p.startsWith('data:') && !p.startsWith('http'));
+  if (paths.length === 0) return;
+
+  try {
+    const { data, error } = await supabaseClient.storage.from('expense-bills').createSignedUrls(paths, 60 * 60 * 2); // 2 hours
+    if (!error && data) {
+      rows.forEach(r => {
+        const match = data.find(d => d.path === r[pathField]);
+        if (match) {
+          r[urlField] = match.signedUrl;
+        }
+      });
+    }
+  } catch (err) {
+    console.warn('Failed to generate signed URLs:', err);
   }
 }
 
@@ -134,74 +137,7 @@ async function refreshDBCaches() {
   }
 }
 
-function getDB() {
-  if (useInMemoryFallback) return Promise.resolve(null);
-  if (dbInstance) return Promise.resolve(dbInstance);
-
-  return new Promise((resolve) => {
-    const timeoutId = setTimeout(() => {
-      console.warn('IndexedDB timed out. Using memory fallback.');
-      useInMemoryFallback = true;
-      resolve(null);
-    }, 1200);
-
-    const request = indexedDB.open(DB_NAME, DB_VERSION);
-    request.onupgradeneeded = (event) => {
-      const db = event.target.result;
-      if (!db.objectStoreNames.contains('cash_transactions')) {
-        db.createObjectStore('cash_transactions', { keyPath: 'id' });
-      }
-      if (!db.objectStoreNames.contains('expenses')) {
-        db.createObjectStore('expenses', { keyPath: 'id' });
-      }
-      if (!db.objectStoreNames.contains('staff')) {
-        db.createObjectStore('staff', { keyPath: 'id' });
-      }
-      if (!db.objectStoreNames.contains('notes')) {
-        db.createObjectStore('notes', { keyPath: 'id' });
-      }
-      if (!db.objectStoreNames.contains('incoming_money')) {
-        db.createObjectStore('incoming_money', { keyPath: 'id' });
-      }
-    };
-    request.onsuccess = (event) => {
-      clearTimeout(timeoutId);
-      dbInstance = event.target.result;
-      resolve(dbInstance);
-    };
-    request.onerror = () => {
-      clearTimeout(timeoutId);
-      useInMemoryFallback = true;
-      resolve(null);
-    };
-  });
-}
-
-function runTx(storeName, mode, callback) {
-  return getDB().then((db) => {
-    if (useInMemoryFallback || !db) return Promise.reject(new Error('IndexedDB offline'));
-    return new Promise((resolve, reject) => {
-      try {
-        const tx = db.transaction(storeName, mode);
-        const store = tx.objectStore(storeName);
-        const result = callback(store);
-        tx.oncomplete = () => resolve(result);
-        tx.onerror = (e) => reject(e.target.error);
-      } catch (err) {
-        reject(err);
-      }
-    });
-  });
-}
-
-function prom(request) {
-  return new Promise((resolve, reject) => {
-    request.onsuccess = (e) => resolve(e.target.result);
-    request.onerror = (e) => reject(e.target.error);
-  });
-}
-
-// Data Mapping Utilities for Normalized Database
+// Formatting mapping helpers
 function fromSupabaseTx(row) {
   const staff = profilesCache.find(p => p.id === row.staff_id);
   return {
@@ -261,7 +197,7 @@ function toSupabaseExp(exp) {
     id: exp.id,
     date_time: exp.dateTime,
     staff_id: exp.isOwnerExpense ? null : (staff ? staff.id : null),
-    category_id: cat ? cat.id : '00000000-0000-0000-0000-000000000014', // default "Other" ID
+    category_id: cat ? cat.id : '00000000-0000-0000-0000-000000000014', // default "Other"
     custom_category: exp.customCategory || null,
     amount: parseFloat(exp.amount),
     payment_method: exp.paymentMethod,
@@ -323,102 +259,61 @@ function toSupabaseInc(inc) {
 }
 
 const db = {
-  // Cash Transactions
+  // Cash Transactions CRUD
   async getCashTransactions() {
-    if (isOnline()) {
-      try {
-        const { data, error } = await supabaseClient
-          .from('money_transfers')
-          .select('*')
-          .is('deleted_at', null)
-          .order('date_time', { ascending: true });
-        if (!error && data) {
-          const mapped = data.map(fromSupabaseTx);
-          await this.overwriteLocalStore('cash_transactions', mapped);
-          return mapped;
-        }
-      } catch (err) {
-        console.warn('Fetch transfers failed. Using cache.', err);
-      }
-    }
-    if (useInMemoryFallback) return inMemoryData.cash_transactions;
-    return runTx('cash_transactions', 'readonly', (store) => prom(store.getAll())).catch(() => inMemoryData.cash_transactions);
+    if (!isOnline()) throw new Error('Database is offline or disconnected.');
+    const { data, error } = await supabaseClient
+      .from('money_transfers')
+      .select('*')
+      .is('deleted_at', null)
+      .order('date_time', { ascending: true });
+    if (error) throw new Error('Failed to load transfers: ' + error.message);
+    return data.map(fromSupabaseTx);
   },
 
   async addCashTransaction(tx) {
-    tx.pendingSync = !isOnline();
-    if (useInMemoryFallback) {
-      inMemoryData.cash_transactions.push(tx);
-    } else {
-      await runTx('cash_transactions', 'readwrite', (store) => prom(store.put(tx)));
-    }
-
-    if (isOnline()) {
-      try {
-        const { error } = await supabaseClient.from('money_transfers').upsert(toSupabaseTx(tx));
-        if (!error) {
-          tx.pendingSync = false;
-          if (!useInMemoryFallback) {
-            await runTx('cash_transactions', 'readwrite', (store) => prom(store.put(tx)));
-          }
-        }
-      } catch (err) {
-        console.error('Supabase transfer insertion error:', err);
-      }
-    }
+    if (!isOnline()) throw new Error('Database is offline or disconnected.');
+    const { error } = await supabaseClient.from('money_transfers').upsert(toSupabaseTx(tx));
+    if (error) throw new Error('Failed to save transfer: ' + error.message);
     return tx;
   },
 
-  // Expenses
+  // Expenses CRUD
   async getExpenses() {
-    if (isOnline()) {
-      try {
-        const { data, error } = await supabaseClient
-          .from('expenses')
-          .select('*')
-          .is('deleted_at', null)
-          .order('date_time', { ascending: true });
-        if (!error && data) {
-          const mapped = data.map(fromSupabaseExp);
-          await this.overwriteLocalStore('expenses', mapped);
-          return mapped;
-        }
-      } catch (err) {
-        console.warn('Fetch expenses failed. Using cache.', err);
-      }
-    }
-    if (useInMemoryFallback) return inMemoryData.expenses;
-    return runTx('expenses', 'readonly', (store) => prom(store.getAll())).catch(() => inMemoryData.expenses);
+    if (!isOnline()) throw new Error('Database is offline or disconnected.');
+    const { data, error } = await supabaseClient
+      .from('expenses')
+      .select('*')
+      .is('deleted_at', null)
+      .order('date_time', { ascending: true });
+    if (error) throw new Error('Failed to load expenses: ' + error.message);
+    
+    const mapped = data.map(fromSupabaseExp);
+    await resolveSignedUrls(mapped, 'receiptPhoto', 'receiptPhoto');
+    return mapped;
   },
 
   async addExpense(expense) {
-    expense.pendingSync = !isOnline();
-    if (useInMemoryFallback) {
-      inMemoryData.expenses.push(expense);
-    } else {
-      await runTx('expenses', 'readwrite', (store) => prom(store.put(expense)));
+    if (!isOnline()) throw new Error('Database is offline or disconnected.');
+    if (expense.receiptPhoto && expense.receiptPhoto.startsWith('data:')) {
+      const ext = expense.receiptPhoto.includes('image/png') ? 'png' : 'jpg';
+      const filename = `expense-${expense.id}-${Date.now()}.${ext}`;
+      const savedFilename = await uploadBase64ToStorage(expense.receiptPhoto, filename);
+      if (savedFilename) {
+        expense.receiptPhoto = savedFilename;
+      }
     }
 
-    if (isOnline()) {
-      try {
-        if (expense.receiptPhoto && expense.receiptPhoto.startsWith('data:')) {
-          const ext = expense.receiptPhoto.includes('image/png') ? 'png' : 'jpg';
-          const filename = `expense-${expense.id}-${Date.now()}.${ext}`;
-          const publicUrl = await uploadBase64ToStorage(expense.receiptPhoto, filename);
-          if (publicUrl) {
-            expense.receiptPhoto = publicUrl;
-          }
-        }
+    const { error } = await supabaseClient.from('expenses').upsert(toSupabaseExp(expense));
+    if (error) throw new Error('Failed to save expense: ' + error.message);
 
-        const { error } = await supabaseClient.from('expenses').upsert(toSupabaseExp(expense));
-        if (!error) {
-          expense.pendingSync = false;
-          if (!useInMemoryFallback) {
-            await runTx('expenses', 'readwrite', (store) => prom(store.put(expense)));
-          }
-        }
-      } catch (err) {
-        console.error('Supabase expense insertion error:', err);
+    // Resolve signed URL immediately for UI rendering
+    if (expense.receiptPhoto && !expense.receiptPhoto.startsWith('data:') && !expense.receiptPhoto.startsWith('http')) {
+      const { data: signedData, error: signedErr } = await supabaseClient.storage
+        .from('expense-bills')
+        .createSignedUrl(expense.receiptPhoto, 60 * 60 * 2);
+      if (!signedErr && signedData) {
+        expense.receiptPhoto = signedData.signedUrl;
       }
     }
     return expense;
@@ -429,241 +324,166 @@ const db = {
   },
 
   async deleteExpense(id) {
-    if (useInMemoryFallback) {
-      inMemoryData.expenses = inMemoryData.expenses.filter(e => e.id !== id);
-    } else {
-      await runTx('expenses', 'readwrite', (store) => prom(store.delete(id)));
-    }
-
-    if (isOnline()) {
-      try {
-        // Implement soft delete to preserve historical audit logs in production
-        await supabaseClient.from('expenses').update({ deleted_at: new Date().toISOString() }).eq('id', id);
-      } catch (err) {
-        console.error('Supabase expense deletion error:', err);
-      }
-    }
+    if (!isOnline()) throw new Error('Database is offline or disconnected.');
+    const { error } = await supabaseClient.from('expenses').update({ deleted_at: new Date().toISOString() }).eq('id', id);
+    if (error) throw new Error('Failed to delete expense: ' + error.message);
     return id;
   },
 
-  // Staff registry
+  // Staff CRUD
   async getStaff() {
-    if (isOnline()) {
-      try {
-        const { data, error } = await supabaseClient
-          .from('profiles')
-          .select('*')
-          .is('deleted_at', null)
-          .order('name', { ascending: true });
-        if (!error && data) {
-          profilesCache = data;
-          // Keep raw plain PINs locally in IndexedDB context to support offline login matching
-          const currentLocal = useInMemoryFallback ? inMemoryData.staff : await runTx('staff', 'readonly', (store) => prom(store.getAll()));
-          const merged = data.map(dbProf => {
-            const matchLocal = currentLocal.find(l => l.name === dbProf.name);
-            return {
-              id: dbProf.id,
-              name: dbProf.name,
-              role: dbProf.role,
-              pin: matchLocal ? matchLocal.pin : dbProf.pin, // Keep plain local PIN cache
-              status: dbProf.status
-            };
-          });
-          await this.overwriteLocalStore('staff', merged);
-          return merged;
-        }
-      } catch (err) {
-        console.warn('Fetch staff failed. Using cache.', err);
-      }
-    }
-    if (useInMemoryFallback) return inMemoryData.staff;
-    return runTx('staff', 'readonly', (store) => prom(store.getAll())).catch(() => inMemoryData.staff);
+    if (!isOnline()) throw new Error('Database is offline or disconnected.');
+    const { data, error } = await supabaseClient
+      .from('profiles')
+      .select('*')
+      .is('deleted_at', null)
+      .order('name', { ascending: true });
+    if (error) throw new Error('Failed to load staff roster: ' + error.message);
+    profilesCache = data;
+    return data.map(dbProf => {
+      return {
+        id: dbProf.id,
+        name: dbProf.name,
+        role: dbProf.role,
+        pin: dbProf.pin,
+        status: dbProf.status,
+        phone: dbProf.phone,
+        email: dbProf.email
+      };
+    });
   },
 
   async addStaff(staffMember) {
-    if (useInMemoryFallback) {
-      inMemoryData.staff.push(staffMember);
-    } else {
-      await runTx('staff', 'readwrite', (store) => prom(store.put(staffMember)));
-    }
+    if (!isOnline()) throw new Error('Database is offline or disconnected.');
+    const email = `${staffMember.name.toLowerCase()}@saroutdoors.com`;
+    const password = `saroutdoors-pin${staffMember.pin}`;
+    
+    // Auth Signup
+    const { data, error } = await supabaseClient.auth.signUp({ email, password });
+    const userId = data?.user?.id || staffMember.id;
+    
+    const profile = {
+      id: userId,
+      name: staffMember.name,
+      email: email,
+      phone: staffMember.phone || `+91-${staffMember.name.toLowerCase()}-${Date.now()}`,
+      role: staffMember.role,
+      pin: staffMember.pin,
+      company_id: '00000000-0000-0000-0000-000000000001',
+      status: staffMember.status || 'Active'
+    };
 
-    if (isOnline()) {
-      try {
-        // Build credentials format
-        const email = `${staffMember.name.toLowerCase()}@saroutdoors.com`;
-        const password = `saroutdoors-pin${staffMember.pin}`;
-        
-        const { data, error } = await supabaseClient.auth.signUp({ email, password });
-        const userId = data?.user?.id || staffMember.id;
-        
-        const profile = {
-          id: userId,
-          name: staffMember.name,
-          email: email,
-          phone: staffMember.phone || `+91-${staffMember.name.toLowerCase()}-${Date.now()}`,
-          role: staffMember.role,
-          pin: staffMember.pin, // DB trigger automatically crypts this plain string into bcrypt hash
-          company_id: '00000000-0000-0000-0000-000000000001',
-          status: staffMember.status || 'Active'
-        };
-
-        const { error: dbErr } = await supabaseClient.from('profiles').upsert(profile);
-        if (dbErr) console.error('Error writing profile to Supabase:', dbErr);
-        
-        await refreshDBCaches();
-      } catch (err) {
-        console.error('Supabase staff registry error:', err);
-      }
-    }
+    const { error: dbErr } = await supabaseClient.from('profiles').upsert(profile);
+    if (dbErr) throw new Error('Failed to save staff profile: ' + dbErr.message);
+    
+    await refreshDBCaches();
     return staffMember;
   },
 
   async updateStaff(staffMember) {
-    return this.addStaff(staffMember);
+    if (!isOnline()) throw new Error('Database is offline or disconnected.');
+    const profile = {
+      id: staffMember.id,
+      name: staffMember.name,
+      role: staffMember.role,
+      status: staffMember.status || 'Active'
+    };
+    if (staffMember.pin) {
+      profile.pin = staffMember.pin;
+    }
+    const { error: dbErr } = await supabaseClient.from('profiles').upsert(profile);
+    if (dbErr) throw new Error('Failed to update staff profile: ' + dbErr.message);
+    await refreshDBCaches();
+    return staffMember;
   },
 
   async deleteStaff(id) {
-    if (useInMemoryFallback) {
-      inMemoryData.staff = inMemoryData.staff.filter(s => s.id !== id);
-    } else {
-      await runTx('staff', 'readwrite', (store) => prom(store.delete(id)));
-    }
-
-    if (isOnline()) {
-      try {
-        await supabaseClient.from('profiles').update({ deleted_at: new Date().toISOString() }).eq('id', id);
-      } catch (err) {
-        console.error('Supabase staff delete error:', err);
-      }
-    }
+    if (!isOnline()) throw new Error('Database is offline or disconnected.');
+    const { error } = await supabaseClient.from('profiles').update({ deleted_at: new Date().toISOString() }).eq('id', id);
+    if (error) throw new Error('Failed to delete staff: ' + error.message);
     return id;
   },
 
-  // Notes updates
+  // Notes CRUD
   async getNotes() {
-    if (isOnline()) {
-      try {
-        const { data, error } = await supabaseClient
-          .from('notes')
-          .select('*')
-          .order('created_at', { ascending: false });
-        if (!error && data) {
-          const simplified = data.map(n => {
-            const author = profilesCache.find(p => p.id === n.created_by_id);
-            return {
-              id: n.id,
-              title: n.title,
-              content: n.content,
-              createdBy: author ? author.name : 'Unknown',
-              createdAt: n.created_at,
-              company_id: n.company_id
-            };
-          });
-          await this.overwriteLocalStore('notes', simplified);
-          return simplified;
-        }
-      } catch (err) {
-        console.warn('Fetch notes failed. Using cache.', err);
-      }
-    }
-    if (useInMemoryFallback) return inMemoryData.notes;
-    return runTx('notes', 'readonly', (store) => prom(store.getAll())).catch(() => inMemoryData.notes);
+    if (!isOnline()) throw new Error('Database is offline or disconnected.');
+    const { data, error } = await supabaseClient
+      .from('notes')
+      .select('*, creator:profiles(name)')
+      .order('created_at', { ascending: false });
+    if (error) throw new Error('Failed to load notes: ' + error.message);
+    
+    return data.map(n => {
+      return {
+        id: n.id,
+        title: n.title,
+        content: n.content,
+        createdBy: n.creator ? n.creator.name : 'Unknown',
+        createdAt: n.created_at,
+        company_id: n.company_id
+      };
+    });
   },
 
   async addNote(note) {
-    if (useInMemoryFallback) {
-      inMemoryData.notes.push(note);
-    } else {
-      await runTx('notes', 'readwrite', (store) => prom(store.put(note)));
-    }
-
-    if (isOnline()) {
-      try {
-        const author = profilesCache.find(p => p.name === note.createdBy);
-        const dbNote = {
-          id: note.id,
-          title: note.title,
-          content: note.content,
-          created_by_id: author ? author.id : '00000000-0000-0000-0000-000000000000',
-          created_at: note.createdAt || new Date().toISOString(),
-          company_id: '00000000-0000-0000-0000-000000000001'
-        };
-        await supabaseClient.from('notes').upsert(dbNote);
-      } catch (err) {
-        console.error('Supabase note write error:', err);
-      }
-    }
+    if (!isOnline()) throw new Error('Database is offline or disconnected.');
+    const author = profilesCache.find(p => p.name === note.createdBy);
+    const dbNote = {
+      id: note.id,
+      title: note.title,
+      content: note.content,
+      created_by_id: author ? author.id : '00000000-0000-0000-0000-000000000000',
+      created_at: note.createdAt || new Date().toISOString(),
+      company_id: '00000000-0000-0000-0000-000000000001'
+    };
+    const { error } = await supabaseClient.from('notes').upsert(dbNote);
+    if (error) throw new Error('Failed to save note: ' + error.message);
     return note;
   },
 
   async deleteNote(id) {
-    if (useInMemoryFallback) {
-      inMemoryData.notes = inMemoryData.notes.filter(n => n.id !== id);
-    } else {
-      await runTx('notes', 'readwrite', (store) => prom(store.delete(id)));
-    }
-
-    if (isOnline()) {
-      try {
-        await supabaseClient.from('notes').delete().eq('id', id);
-      } catch (err) {
-        console.error('Supabase note delete error:', err);
-      }
-    }
+    if (!isOnline()) throw new Error('Database is offline or disconnected.');
+    const { error } = await supabaseClient.from('notes').delete().eq('id', id);
+    if (error) throw new Error('Failed to delete note: ' + error.message);
     return id;
   },
 
-  // Incoming Money
+  // Incoming Money CRUD
   async getIncomingMoney() {
-    if (isOnline()) {
-      try {
-        const { data, error } = await supabaseClient
-          .from('incoming_money')
-          .select('*')
-          .is('deleted_at', null)
-          .order('date_time', { ascending: true });
-        if (!error && data) {
-          const mapped = data.map(fromSupabaseInc);
-          await this.overwriteLocalStore('incoming_money', mapped);
-          return mapped;
-        }
-      } catch (err) {
-        console.warn('Fetch incoming money failed. Using cache.', err);
-      }
-    }
-    if (useInMemoryFallback) return inMemoryData.incoming_money || [];
-    return runTx('incoming_money', 'readonly', (store) => prom(store.getAll())).catch(() => inMemoryData.incoming_money || []);
+    if (!isOnline()) throw new Error('Database is offline or disconnected.');
+    const { data, error } = await supabaseClient
+      .from('incoming_money')
+      .select('*')
+      .is('deleted_at', null)
+      .order('date_time', { ascending: true });
+    if (error) throw new Error('Failed to load incoming money: ' + error.message);
+    
+    const mapped = data.map(fromSupabaseInc);
+    await resolveSignedUrls(mapped, 'proofPhoto', 'proofPhoto');
+    return mapped;
   },
 
   async addIncomingMoney(record) {
-    record.pendingSync = !isOnline();
-    if (useInMemoryFallback) {
-      if (!inMemoryData.incoming_money) inMemoryData.incoming_money = [];
-      inMemoryData.incoming_money.push(record);
-    } else {
-      await runTx('incoming_money', 'readwrite', (store) => prom(store.put(record)));
+    if (!isOnline()) throw new Error('Database is offline or disconnected.');
+    if (record.proofPhoto && record.proofPhoto.startsWith('data:')) {
+      const ext = record.proofPhoto.includes('image/png') ? 'png' : 'jpg';
+      const filename = `incoming-${record.id}-${Date.now()}.${ext}`;
+      const savedFilename = await uploadBase64ToStorage(record.proofPhoto, filename);
+      if (savedFilename) {
+        record.proofPhoto = savedFilename;
+      }
     }
 
-    if (isOnline()) {
-      try {
-        if (record.proofPhoto && record.proofPhoto.startsWith('data:')) {
-          const ext = record.proofPhoto.includes('image/png') ? 'png' : 'jpg';
-          const filename = `incoming-${record.id}-${Date.now()}.${ext}`;
-          const publicUrl = await uploadBase64ToStorage(record.proofPhoto, filename);
-          if (publicUrl) {
-            record.proofPhoto = publicUrl;
-          }
-        }
+    const { error } = await supabaseClient.from('incoming_money').upsert(toSupabaseInc(record));
+    if (error) throw new Error('Failed to save incoming money: ' + error.message);
 
-        const { error } = await supabaseClient.from('incoming_money').upsert(toSupabaseInc(record));
-        if (!error) {
-          record.pendingSync = false;
-          if (!useInMemoryFallback) {
-            await runTx('incoming_money', 'readwrite', (store) => prom(store.put(record)));
-          }
-        }
-      } catch (err) {
-        console.error('Supabase incoming money write error:', err);
+    // Resolve signed URL immediately for UI rendering
+    if (record.proofPhoto && !record.proofPhoto.startsWith('data:') && !record.proofPhoto.startsWith('http')) {
+      const { data: signedData, error: signedErr } = await supabaseClient.storage
+        .from('expense-bills')
+        .createSignedUrl(record.proofPhoto, 60 * 60 * 2);
+      if (!signedErr && signedData) {
+        record.proofPhoto = signedData.signedUrl;
       }
     }
     return record;
@@ -674,205 +494,71 @@ const db = {
   },
 
   async deleteIncomingMoney(id) {
-    if (useInMemoryFallback) {
-      inMemoryData.incoming_money = (inMemoryData.incoming_money || []).filter(i => i.id !== id);
-    } else {
-      await runTx('incoming_money', 'readwrite', (store) => prom(store.delete(id)));
-    }
-
-    if (isOnline()) {
-      try {
-        // Use soft delete
-        await supabaseClient.from('incoming_money').update({ deleted_at: new Date().toISOString() }).eq('id', id);
-      } catch (err) {
-        console.error('Supabase incoming money delete error:', err);
-      }
-    }
+    if (!isOnline()) throw new Error('Database is offline or disconnected.');
+    const { error } = await supabaseClient.from('incoming_money').update({ deleted_at: new Date().toISOString() }).eq('id', id);
+    if (error) throw new Error('Failed to delete incoming record: ' + error.message);
     return id;
   },
 
-  // Cache Overwrite Helper
-  async overwriteLocalStore(storeName, dataList) {
-    if (useInMemoryFallback) {
-      inMemoryData[storeName] = [...dataList];
-      return;
-    }
-    try {
-      await runTx(storeName, 'readwrite', (store) => {
-        store.clear();
-        dataList.forEach(item => store.put(item));
-      });
-    } catch (e) {
-      console.warn(`Local cache overwrite failed for ${storeName}:`, e);
-    }
-  },
-
-  // Full clean reset (Owner Settings operation)
+  // Reset database tables
   async resetAllData() {
-    if (isOnline()) {
-      try {
-        await supabaseClient.from('money_transfers').delete().neq('id', '00000000-0000-0000-0000-000000000000');
-        await supabaseClient.from('expenses').delete().neq('id', '00000000-0000-0000-0000-000000000000');
-        await supabaseClient.from('incoming_money').delete().neq('id', '00000000-0000-0000-0000-000000000000');
-        await supabaseClient.from('notes').delete().neq('id', '00000000-0000-0000-0000-000000000000');
-      } catch (err) {
-        console.error('Supabase server reset data error:', err);
-      }
-    }
-    inMemoryData.cash_transactions = [];
-    inMemoryData.expenses = [];
-    inMemoryData.notes = [];
-    inMemoryData.incoming_money = [];
-
-    if (!useInMemoryFallback) {
-      await Promise.all([
-        runTx('cash_transactions', 'readwrite', (store) => prom(store.clear())),
-        runTx('expenses', 'readwrite', (store) => prom(store.clear())),
-        runTx('notes', 'readwrite', (store) => prom(store.clear())),
-        runTx('incoming_money', 'readwrite', (store) => prom(store.clear()))
-      ]).catch(e => console.warn('IndexedDB reset clear error:', e));
-    }
+    if (!isOnline()) throw new Error('Database is offline or disconnected.');
+    const { error: err1 } = await supabaseClient.from('money_transfers').delete().neq('id', '00000000-0000-0000-0000-000000000000');
+    const { error: err2 } = await supabaseClient.from('expenses').delete().neq('id', '00000000-0000-0000-0000-000000000000');
+    const { error: err3 } = await supabaseClient.from('incoming_money').delete().neq('id', '00000000-0000-0000-0000-000000000000');
+    const { error: err4 } = await supabaseClient.from('notes').delete().neq('id', '00000000-0000-0000-0000-000000000000');
+    if (err1 || err2 || err3 || err4) throw new Error('Failed to reset database tables on Supabase.');
   },
 
-  // Overwrite entire dataset (called when restoring state or importing)
+  // Restore dataset directly to Supabase
   async overwriteAllLocalData(staffList, txList, expList, incomingList = []) {
-    if (isOnline()) {
-      try {
-        for (const s of staffList) {
-          const profile = {
-            id: s.id,
-            name: s.name,
-            email: s.email || `${s.name.toLowerCase()}@saroutdoors.com`,
-            phone: s.phone || `+91-${s.name.toLowerCase()}-${Date.now()}`,
-            role: s.role,
-            pin: s.pin,
-            company_id: '00000000-0000-0000-0000-000000000001',
-            status: s.status || 'Active'
-          };
-          await supabaseClient.from('profiles').upsert(profile);
-        }
-        for (const t of txList) {
-          await supabaseClient.from('money_transfers').upsert(toSupabaseTx(t));
-        }
-        for (const e of expList) {
-          await supabaseClient.from('expenses').upsert(toSupabaseExp(e));
-        }
-        for (const i of incomingList) {
-          await supabaseClient.from('incoming_money').upsert(toSupabaseInc(i));
-        }
-      } catch (err) {
-        console.error('Overwrite Supabase restore failed:', err);
+    if (!isOnline()) throw new Error('Database is offline or disconnected.');
+    try {
+      for (const s of staffList) {
+        const profile = {
+          id: s.id,
+          name: s.name,
+          email: s.email || `${s.name.toLowerCase()}@saroutdoors.com`,
+          phone: s.phone || `+91-${s.name.toLowerCase()}-${Date.now()}`,
+          role: s.role,
+          pin: s.pin,
+          company_id: '00000000-0000-0000-0000-000000000001',
+          status: s.status || 'Active'
+        };
+        await supabaseClient.from('profiles').upsert(profile);
       }
-    }
-
-    inMemoryData.staff = [...staffList];
-    inMemoryData.cash_transactions = [...txList];
-    inMemoryData.expenses = [...expList];
-    inMemoryData.incoming_money = [...incomingList];
-
-    if (!useInMemoryFallback) {
-      await Promise.all([
-        runTx('staff', 'readwrite', (store) => {
-          store.clear();
-          staffList.forEach(s => store.put(s));
-        }),
-        runTx('cash_transactions', 'readwrite', (store) => {
-          store.clear();
-          txList.forEach(t => store.put(t));
-        }),
-        runTx('expenses', 'readwrite', (store) => {
-          store.clear();
-          expList.forEach(e => store.put(e));
-        }),
-        runTx('incoming_money', 'readwrite', (store) => {
-          store.clear();
-          incomingList.forEach(i => store.put(i));
-        })
-      ]).catch(e => console.warn('IndexedDB bulk write error:', e));
+      for (const t of txList) {
+        await supabaseClient.from('money_transfers').upsert(toSupabaseTx(t));
+      }
+      for (const e of expList) {
+        await supabaseClient.from('expenses').upsert(toSupabaseExp(e));
+      }
+      for (const i of incomingList) {
+        await supabaseClient.from('incoming_money').upsert(toSupabaseInc(i));
+      }
+    } catch (err) {
+      throw new Error('Supabase restore failed: ' + err.message);
     }
   },
 
-  // Background Auto-sync loop for offline creations
   async syncOfflineQueue() {
-    if (!isOnline()) return;
-    try {
-      await refreshDBCaches();
-
-      // 1. Sync Cash Transfers
-      const localTxs = useInMemoryFallback ? inMemoryData.cash_transactions : await runTx('cash_transactions', 'readonly', (store) => prom(store.getAll()));
-      const pendingTxs = localTxs.filter(t => t.pendingSync);
-      for (const t of pendingTxs) {
-        const { error } = await supabaseClient.from('money_transfers').upsert(toSupabaseTx(t));
-        if (!error) {
-          t.pendingSync = false;
-          if (!useInMemoryFallback) await runTx('cash_transactions', 'readwrite', (store) => prom(store.put(t)));
-        }
-      }
-
-      // 2. Sync Expenses
-      const localExps = useInMemoryFallback ? inMemoryData.expenses : await runTx('expenses', 'readonly', (store) => prom(store.getAll()));
-      const pendingExps = localExps.filter(e => e.pendingSync);
-      for (const e of pendingExps) {
-        if (e.receiptPhoto && e.receiptPhoto.startsWith('data:')) {
-          const ext = e.receiptPhoto.includes('image/png') ? 'png' : 'jpg';
-          const filename = `expense-${e.id}-${Date.now()}.${ext}`;
-          const publicUrl = await uploadBase64ToStorage(e.receiptPhoto, filename);
-          if (publicUrl) e.receiptPhoto = publicUrl;
-        }
-        const { error } = await supabaseClient.from('expenses').upsert(toSupabaseExp(e));
-        if (!error) {
-          e.pendingSync = false;
-          if (!useInMemoryFallback) await runTx('expenses', 'readwrite', (store) => prom(store.put(e)));
-        }
-      }
-
-      // 3. Sync Incoming Money
-      const localIncs = useInMemoryFallback ? inMemoryData.incoming_money : await runTx('incoming_money', 'readonly', (store) => prom(store.getAll()));
-      const pendingIncs = (localIncs || []).filter(i => i.pendingSync);
-      for (const i of pendingIncs) {
-        if (i.proofPhoto && i.proofPhoto.startsWith('data:')) {
-          const ext = i.proofPhoto.includes('image/png') ? 'png' : 'jpg';
-          const filename = `incoming-${i.id}-${Date.now()}.${ext}`;
-          const publicUrl = await uploadBase64ToStorage(i.proofPhoto, filename);
-          if (publicUrl) i.proofPhoto = publicUrl;
-        }
-        const { error } = await supabaseClient.from('incoming_money').upsert(toSupabaseInc(i));
-        if (!error) {
-          i.pendingSync = false;
-          if (!useInMemoryFallback) await runTx('incoming_money', 'readwrite', (store) => prom(store.put(i)));
-        }
-      }
-
-      if (pendingTxs.length > 0 || pendingExps.length > 0 || pendingIncs.length > 0) {
-        console.log('Offline pending records successfully synchronized with Supabase.');
-      }
-    } catch (e) {
-      console.error('Error during offline synchronization:', e);
-    }
+    // Obsolete: direct integration no-op
   },
 
   // Setup database connection and seed defaults if empty
   async initAndSeed() {
-    await getDB();
     await initSupabase();
+    if (!isOnline()) {
+      console.warn('Database is offline. Direct data connection unavailable.');
+      return;
+    }
     await refreshDBCaches();
 
-    // Setup network status listeners to trigger syncs
-    window.addEventListener('online', () => {
-      console.log('Connection restored. Running auto-sync queue...');
-      this.syncOfflineQueue();
-    });
-
-    // Run a periodic sync check every 15 seconds
-    setInterval(() => {
-      this.syncOfflineQueue();
-    }, 15000);
-
     try {
-      // Seed default roster if table is empty
+      // Seed default roster if empty in database
       const staffList = await this.getStaff();
       if (staffList.length === 0) {
-        console.log('Seeding default profiles to database...');
+        console.log('Seeding default profiles to Supabase...');
         for (const s of DEFAULT_STAFF) {
           await this.addStaff(s);
         }

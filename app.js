@@ -117,7 +117,7 @@ const app = {
       this.showToast('TrailCash Database Loaded & Synced!', 'success');
     } catch (err) {
       console.error('Init error:', err);
-      this.showToast('Database error. Using offline fallback.', 'warning');
+      this.showToast('Database error: ' + (err.message || err) + '. Using offline fallback.', 'warning');
       this.renderLoginProfiles();
     }
   },
@@ -332,10 +332,11 @@ const app = {
 
     if (this.enteredPin.length === 4) {
       let loginSuccess = false;
+      let errMsg = '';
       const email = `${this.loginSelectedUser.name.toLowerCase()}@saroutdoors.com`;
       const password = `saroutdoors-pin${this.enteredPin}`;
 
-      if (navigator.onLine && window.supabaseInstance) {
+      if (window.supabaseInstance) {
         try {
           const { data, error } = await window.supabaseInstance.auth.signInWithPassword({
             email,
@@ -344,19 +345,15 @@ const app = {
           if (!error && data?.user) {
             loginSuccess = true;
           } else {
-            console.warn('Supabase Auth login failed, testing cached credentials...', error);
+            errMsg = error ? error.message : 'Unknown error';
+            console.warn('Supabase Auth login failed:', error);
           }
         } catch (err) {
-          console.warn('Supabase authentication server unreachable:', err);
+          errMsg = err.message || err;
+          console.error('Supabase authentication server error:', err);
         }
-      }
-
-      // Fallback: If offline or Supabase sign-in failed, check local pin value
-      if (!loginSuccess) {
-        if (this.enteredPin === this.loginSelectedUser.pin) {
-          loginSuccess = true;
-          console.log('User authenticated offline successfully.');
-        }
+      } else {
+        errMsg = 'Database connection not initialized.';
       }
 
       if (loginSuccess) {
@@ -376,7 +373,9 @@ const app = {
         const container = document.getElementById('pinViewContainer');
         container.classList.add('shake-element');
         const errText = document.getElementById('pinErrorText');
-        errText.textContent = this.currentLanguage === 'en' ? 'Incorrect PIN! Try again.' : 'ग़लत पिन! पुनः प्रयास करें।';
+        errText.textContent = this.currentLanguage === 'en' 
+          ? `Login failed: ${errMsg}` 
+          : `लॉगिन विफल: ${errMsg}`;
         errText.classList.add('active');
         
         setTimeout(() => {
@@ -1814,7 +1813,7 @@ const app = {
       this.updateView();
     } catch (err) {
       console.error(err);
-      this.showToast('Failed to save company expense.', 'danger');
+      this.showToast('Failed to save company expense: ' + (err.message || err), 'danger');
     }
   },
 
@@ -1901,7 +1900,7 @@ const app = {
       this.updateView();
     } catch (err) {
       console.error(err);
-      this.showToast('Failed to add staff member.', 'danger');
+      this.showToast('Failed to add staff member: ' + (err.message || err), 'danger');
     }
   },
 
@@ -1976,7 +1975,7 @@ const app = {
       this.updateView();
     } catch (err) {
       console.error(err);
-      this.showToast('Failed to edit staff profile.', 'danger');
+      this.showToast('Failed to edit staff profile: ' + (err.message || err), 'danger');
     }
   },
 
@@ -1999,7 +1998,7 @@ const app = {
         this.updateView();
       } catch (err) {
         console.error(err);
-        this.showToast('Failed to delete staff member.', 'danger');
+        this.showToast('Failed to delete staff member: ' + (err.message || err), 'danger');
       }
     }
   },
@@ -2060,7 +2059,7 @@ const app = {
       this.updateView();
     } catch (err) {
       console.error(err);
-      this.showToast('Failed to save money transfer advance.', 'danger');
+      this.showToast('Failed to save money transfer advance: ' + (err.message || err), 'danger');
     }
   },
 
@@ -2287,7 +2286,7 @@ const app = {
       this.updateView();
     } catch (err) {
       console.error(err);
-      this.showToast('Failed to save expense.', 'danger');
+      this.showToast('Failed to save expense: ' + (err.message || err), 'danger');
     }
   },
 
@@ -2450,7 +2449,7 @@ const app = {
       this.updateView();
     } catch (err) {
       console.error(err);
-      this.showToast('Failed to save incoming money.', 'danger');
+      this.showToast('Failed to save incoming money: ' + (err.message || err), 'danger');
     }
   },
 
@@ -2472,7 +2471,7 @@ const app = {
       this.updateView();
     } catch (err) {
       console.error(err);
-      this.showToast('Failed to approve transaction.', 'danger');
+      this.showToast('Failed to approve transaction: ' + (err.message || err), 'danger');
     }
   },
 
@@ -2494,7 +2493,7 @@ const app = {
       this.updateView();
     } catch (err) {
       console.error(err);
-      this.showToast('Failed to reject transaction.', 'danger');
+      this.showToast('Failed to reject transaction: ' + (err.message || err), 'danger');
     }
   },
 
@@ -2510,7 +2509,7 @@ const app = {
         this.updateView();
       } catch (err) {
         console.error(err);
-        this.showToast('Failed to reset system data.', 'danger');
+        this.showToast('Failed to reset system data: ' + (err.message || err), 'danger');
       }
     }
   },
@@ -2614,7 +2613,7 @@ const app = {
         this.updateView();
       } catch (err) {
         console.error(err);
-        this.showToast('Failed to delete draft.', 'danger');
+        this.showToast('Failed to delete draft: ' + (err.message || err), 'danger');
       }
     }
   },
